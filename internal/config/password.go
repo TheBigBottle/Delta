@@ -1,4 +1,4 @@
-package main
+package config
 
 // Passwords are never stored in plain text. The config file only contains a
 // salted PBKDF2-SHA256 hash. Hashing is one-way: Delta can check whether a
@@ -26,8 +26,8 @@ const (
 	minPasswordLength      = 8
 )
 
-// hashPassword returns the encoded hash of password with a new random salt.
-func hashPassword(password string) (string, error) {
+// HashPassword returns the encoded hash of password with a new random salt.
+func HashPassword(password string) (string, error) {
 	salt := make([]byte, passwordSaltBytes)
 	if _, err := rand.Read(salt); err != nil {
 		return "", err
@@ -40,9 +40,9 @@ func hashPassword(password string) (string, error) {
 	return fmt.Sprintf("%s$%d$%s$%s", passwordHashScheme, passwordHashIterations, encode(salt), encode(key)), nil
 }
 
-// verifyPassword reports whether password matches the encoded hash.
+// VerifyPassword reports whether password matches the encoded hash.
 // It returns false for an empty or malformed hash.
-func verifyPassword(password, encodedHash string) bool {
+func VerifyPassword(password, encodedHash string) bool {
 	parts := strings.Split(encodedHash, "$")
 	if len(parts) != 4 || parts[0] != passwordHashScheme {
 		return false
@@ -60,8 +60,8 @@ func verifyPassword(password, encodedHash string) bool {
 	return err == nil && subtle.ConstantTimeCompare(key, expectedKey) == 1
 }
 
-// checkNewPassword enforces the minimum requirements for a new password.
-func checkNewPassword(password string) error {
+// CheckNewPassword enforces the minimum requirements for a new password.
+func CheckNewPassword(password string) error {
 	if len(password) < minPasswordLength {
 		return fmt.Errorf("the password must have at least %d characters", minPasswordLength)
 	}

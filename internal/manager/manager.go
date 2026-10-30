@@ -1,4 +1,6 @@
-package main
+// Package manager owns all forwarders: their lifecycle, persistence in the
+// config file, traffic rates, alerts, the event log, captures and replays.
+package manager
 
 // The Manager owns all forwarders. It creates, starts, stops and deletes them,
 // writes every change to the config file, samples traffic rates once per
@@ -15,9 +17,12 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"delta/internal/config"
+	"delta/internal/engine"
 )
 
-var errNotFound = errors.New("forwarder not found")
+var ErrNotFound = errors.New("forwarder not found")
 
 const (
 	historyLength      = 600              // seconds of rate history kept per forwarder (10 minutes)
@@ -28,14 +33,14 @@ const (
 // Instance is one configured forwarder plus its runtime state. It exists
 // whether or not the forwarder is running.
 type Instance struct {
-	config       ForwarderConfig
-	running      *Forwarder // nil while stopped
-	state        string     // "stopped", "running" or "error" (failed to start)
+	config       config.ForwarderConfig
+	running      *engine.Forwarder // nil while stopped
+	state        string            // "stopped", "running" or "error" (failed to start)
 	startError   string
 	stateSince   time.Time
 	nextRetryAt  time.Time // when a failed start is tried again
 	rates        Rates     // traffic per second, computed by the sampler
-	lastCounters trafficCounters
+	lastCounters engine.TrafficCounters
 	lastSampleAt time.Time
 	history      rateHistory
 	alerts       map[string]*alertState // keyed by alert kind: "down", "idle"
@@ -67,73 +72,74 @@ type eventRateLimiter struct {
 // ForwarderStatus is what the API returns for a forwarder: its configuration
 // plus the live state. The embedded config fields appear at the top level of the JSON.
 type ForwarderStatus struct {
-	ForwarderConfig
-	State        string            `json:"state"`  // stopped | running | error
-	Health       string            `json:"health"` // stopped | ok | degraded | error
-	Error        string            `json:"error,omitempty"`
-	StateSince   time.Time         `json:"since"`
-	Rates        Rates             `json:"rate"`
-	BytesIn      uint64            `json:"bytes_in"`
-	BytesOut     uint64            `json:"bytes_out"`
-	Messages     uint64            `json:"chunks"`
-	Drops        uint64            `json:"drops"`
-	Connections  int               `json:"clients"`             // ClientsIn + ClientsOut
-	ClientsIn    int               `json:"clients_in"`          // sources connected to the input (TCP clients, UDP senders, the remote host)
-	ClientsOut   int               `json:"clients_out"`         // receivers connected to the outputs
-	LastDataAt   int64             `json:"last_data,omitempty"` // unix milliseconds
-	InputStatus  *EndpointStatus   `json:"in_status,omitempty"`
-	OutputStatus []EndpointStatus  `json:"out_status,omitempty"`
-	FiringAlerts []string          `json:"firing,omitempty"`
-	AlertReasons map[string]string `json:"alert_reasons,omitempty"` // alert kind -> why it fires
-	Capture      *CaptureStatus    `json:"capture,omitempty"`
-	Replay       *ReplayStatus     `json:"replay,omitempty"`
+	config.ForwarderConfig
+	State        string                  `json:"state"`  // stopped | running | error
+	Health       string                  `json:"health"` // stopped | ok | degraded | error
+	Error        string                  `json:"error,omitempty"`
+	StateSince   time.Time               `json:"since"`
+	Rates        Rates                   `json:"rate"`
+	BytesIn      uint64                  `json:"bytes_in"`
+	BytesOut     uint64                  `json:"bytes_out"`
+	Messages     uint64                  `json:"chunks"`
+	Drops        uint64                  `json:"drops"`
+	Connections  int                     `json:"clients"`             // ClientsIn + ClientsOut
+	ClientsIn    int                     `json:"clients_in"`          // sources connected to the input (TCP clients, UDP senders, the remote host)
+	ClientsOut   int                     `json:"clients_out"`         // receivers connected to the outputs
+	LastDataAt   int64                   `json:"last_data,omitempty"` // unix milliseconds
+	InputStatus  *engine.EndpointStatus  `json:"in_status,omitempty"`
+	OutputStatus []engine.EndpointStatus `json:"out_status,omitempty"`
+	FiringAlerts []string                `json:"firing,omitempty"`
+	AlertReasons map[string]string       `json:"alert_reasons,omitempty"` // alert kind -> why it fires
+	Capture      *CaptureStatus          `json:"capture,omitempty"`
+	Replay       *ReplayStatus           `json:"replay,omitempty"`
 }
 
 type Manager struct {
 	mu            sync.Mutex // guards config, instances, instanceOrder and all Instance fields
 	configPath    string
-	config        *Config
+	config        *config.Config
 	dataDir       string
 	instances     map[string]*Instance
 	instanceOrder []string // forwarder IDs in creation order, as stored in the config file
-	events        *EventLog
-	liveUpdates   *EventBus // server-sent events to all open browser tabs
+	Events        *EventLog
+	LiveUpdates   *EventBus // server-sent events to all open browser tabs
 	httpClient    *http.Client
-	webAddress    string // effective web interface address (command line flags may override the config)
+	WebAddress    string // effective web interface address (command line flags may override the config)
+	Version       string // Delta's version, shown in Settings and returned by /api/session
 }
 
-func newManager(configPath string, config *Config) *Manager {
-	dataDir := resolveNextToConfig(configPath, config.DataDir)
+func New(configPath string, cfg *config.Config) *Manager {
+	dataDir := config.ResolvePath(configPath, cfg.DataDir)
 	bus := &EventBus{subscribers: map[chan []byte]struct{}{}}
 	m := &Manager{
-		configPath: configPath, config: config, dataDir: dataDir,
-		instances: map[string]*Instance{}, liveUpdates: bus,
-		events:     newEventLog(bus),
+		configPath: configPath, config: cfg, dataDir: dataDir,
+		instances: map[string]*Instance{}, LiveUpdates: bus,
+		Events:     newEventLog(bus),
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}
 	// Without a usable log file Delta still runs; the events are then kept in memory only.
-	if err := m.events.OpenFile(resolveEventLogPath(configPath, config.EventLog), int64(config.EventLogMaxMB)<<20); err != nil {
-		m.events.Add("error", "", "", err.Error()+" (events are kept in memory only)")
+	if err := m.Events.OpenFile(resolveEventLogPath(configPath, cfg.EventLog), int64(cfg.EventLogMaxMB)<<20); err != nil {
+		m.Events.Add("error", "", "", err.Error()+" (events are kept in memory only)")
 	}
-	for _, fc := range config.Forwarders {
+	for _, fc := range cfg.Forwarders {
 		m.instances[fc.ID] = newInstance(fc)
 		m.instanceOrder = append(m.instanceOrder, fc.ID)
 	}
 	return m
 }
 
-func newInstance(fc ForwarderConfig) *Instance {
+func newInstance(fc config.ForwarderConfig) *Instance {
 	return &Instance{config: fc, state: "stopped", stateSince: time.Now(), alerts: map[string]*alertState{}}
 }
 
 // saveLocked writes the config file. m.mu must be held.
 func (m *Manager) saveLocked() {
-	m.config.Forwarders = make([]ForwarderConfig, 0, len(m.instanceOrder))
+	m.config.Forwarders = make([]config.ForwarderConfig, 0, len(m.instanceOrder))
 	for _, id := range m.instanceOrder {
 		m.config.Forwarders = append(m.config.Forwarders, m.instances[id].config)
 	}
-	if err := saveConfig(m.configPath, m.config); err != nil {
-		m.events.Add("error", "", "", "saving config failed: "+err.Error())
+	if err := config.Save(m.configPath, m.config); err != nil {
+		m.Events.Add("error", "", "", "saving config failed: "+err.Error())
 	}
 }
 
@@ -159,7 +165,7 @@ func (m *Manager) eventLoggerFor(inst *Instance) func(level, message string) {
 		now := time.Now().Unix()
 		if now != limiter.second {
 			if limiter.suppressed > 0 {
-				m.events.Add("warn", id, name, fmt.Sprintf("%d events suppressed", limiter.suppressed))
+				m.Events.Add("warn", id, name, fmt.Sprintf("%d events suppressed", limiter.suppressed))
 			}
 			limiter.second, limiter.count, limiter.suppressed = now, 0, 0
 		}
@@ -170,7 +176,7 @@ func (m *Manager) eventLoggerFor(inst *Instance) func(level, message string) {
 			return
 		}
 		limiter.mu.Unlock()
-		m.events.Add(level, id, name, message)
+		m.Events.Add(level, id, name, message)
 	}
 }
 
@@ -180,27 +186,27 @@ func (m *Manager) startLocked(inst *Instance) error {
 	if inst.running != nil {
 		return nil
 	}
-	fw, err := startForwarder(inst.config, m.eventLoggerFor(inst))
+	fw, err := engine.Start(inst.config, m.eventLoggerFor(inst))
 	inst.stateSince = time.Now()
 	if err != nil {
 		// Log a failed retry only when the reason changes, not every 15 seconds.
 		if inst.state != "error" || inst.startError != err.Error() {
-			m.events.Add("error", inst.config.ID, inst.config.Name, "start failed: "+err.Error())
+			m.Events.Add("error", inst.config.ID, inst.config.Name, "start failed: "+err.Error())
 		}
 		inst.state, inst.startError = "error", err.Error()
 		inst.nextRetryAt = time.Now().Add(startRetryDelay)
 		return err
 	}
 	inst.running, inst.state, inst.startError = fw, "running", ""
-	inst.lastCounters, inst.lastSampleAt = trafficCounters{}, time.Now()
-	m.events.Add("info", inst.config.ID, inst.config.Name, "started")
+	inst.lastCounters, inst.lastSampleAt = engine.TrafficCounters{}, time.Now()
+	m.Events.Add("info", inst.config.ID, inst.config.Name, "started")
 	return nil
 }
 
 // stopLocked detaches the running forwarder and resets the instance state.
 // Stopping a forwarder can take a moment, so the caller must call Stop on the
 // returned forwarder after releasing m.mu (see stopForwarders).
-func (m *Manager) stopLocked(inst *Instance) *Forwarder {
+func (m *Manager) stopLocked(inst *Instance) *engine.Forwarder {
 	fw := inst.running
 	inst.running = nil
 	if inst.capture != nil {
@@ -210,7 +216,7 @@ func (m *Manager) stopLocked(inst *Instance) *Forwarder {
 		inst.replay.stop()
 	}
 	if fw != nil || inst.state == "error" {
-		m.events.Add("info", inst.config.ID, inst.config.Name, "stopped")
+		m.Events.Add("info", inst.config.ID, inst.config.Name, "stopped")
 	}
 	inst.state, inst.startError, inst.stateSince, inst.rates = "stopped", "", time.Now(), Rates{}
 	for _, alert := range inst.alerts {
@@ -220,7 +226,7 @@ func (m *Manager) stopLocked(inst *Instance) *Forwarder {
 }
 
 // stopForwarders stops several forwarders in parallel and waits for all of them.
-func stopForwarders(forwarders ...*Forwarder) {
+func stopForwarders(forwarders ...*engine.Forwarder) {
 	var wg sync.WaitGroup
 	for _, fw := range forwarders {
 		if fw != nil {
@@ -232,16 +238,16 @@ func stopForwarders(forwarders ...*Forwarder) {
 
 // Create adds a new forwarder and optionally starts it. If starting fails,
 // the forwarder is still created; the returned status shows the error.
-func (m *Manager) Create(fc ForwarderConfig, start bool) (ForwarderStatus, error) {
+func (m *Manager) Create(fc config.ForwarderConfig, start bool) (ForwarderStatus, error) {
 	fc.ID, fc.Created, fc.Autostart = "", time.Time{}, start
-	if err := fc.normalize(); err != nil {
+	if err := fc.Normalize(); err != nil {
 		return ForwarderStatus{}, err
 	}
 	m.mu.Lock()
 	inst := newInstance(fc)
 	m.instances[fc.ID] = inst
 	m.instanceOrder = append(m.instanceOrder, fc.ID)
-	m.events.Add("info", fc.ID, fc.Name, "created")
+	m.Events.Add("info", fc.ID, fc.Name, "created")
 	var startErr error
 	if start {
 		startErr = m.startLocked(inst)
@@ -255,15 +261,15 @@ func (m *Manager) Create(fc ForwarderConfig, start bool) (ForwarderStatus, error
 
 // Update replaces a forwarder's configuration. A running forwarder is
 // restarted with the new configuration.
-func (m *Manager) Update(id string, fc ForwarderConfig) (ForwarderStatus, error) {
+func (m *Manager) Update(id string, fc config.ForwarderConfig) (ForwarderStatus, error) {
 	m.mu.Lock()
 	inst := m.instances[id]
 	if inst == nil {
 		m.mu.Unlock()
-		return ForwarderStatus{}, errNotFound
+		return ForwarderStatus{}, ErrNotFound
 	}
 	fc.ID, fc.Created, fc.Autostart = id, inst.config.Created, inst.config.Autostart
-	if err := fc.normalize(); err != nil {
+	if err := fc.Normalize(); err != nil {
 		m.mu.Unlock()
 		return ForwarderStatus{}, err
 	}
@@ -274,7 +280,7 @@ func (m *Manager) Update(id string, fc ForwarderConfig) (ForwarderStatus, error)
 
 	m.mu.Lock()
 	inst.config = fc
-	m.events.Add("info", id, fc.Name, "configuration changed")
+	m.Events.Add("info", id, fc.Name, "configuration changed")
 	var startErr error
 	if wasRunning {
 		startErr = m.startLocked(inst)
@@ -289,17 +295,17 @@ func (m *Manager) Update(id string, fc ForwarderConfig) (ForwarderStatus, error)
 // Delete stops and removes forwarders. Their captures are kept.
 func (m *Manager) Delete(ids ...string) error {
 	m.mu.Lock()
-	var toStop []*Forwarder
+	var toStop []*engine.Forwarder
 	for _, id := range ids {
 		inst := m.instances[id]
 		if inst == nil {
 			m.mu.Unlock()
-			return errNotFound
+			return ErrNotFound
 		}
 		toStop = append(toStop, m.stopLocked(inst))
 		delete(m.instances, id)
 		m.instanceOrder = slices.DeleteFunc(m.instanceOrder, func(other string) bool { return other == id })
-		m.events.Add("info", id, inst.config.Name, "deleted")
+		m.Events.Add("info", id, inst.config.Name, "deleted")
 	}
 	m.saveLocked()
 	m.mu.Unlock()
@@ -312,12 +318,12 @@ func (m *Manager) Delete(ids ...string) error {
 // each forwarder should run after Delta restarts (the autostart flag).
 func (m *Manager) SetRunning(action string, ids ...string) error {
 	m.mu.Lock()
-	var toStop []*Forwarder
+	var toStop []*engine.Forwarder
 	for _, id := range ids {
 		inst := m.instances[id]
 		if inst == nil {
 			m.mu.Unlock()
-			return errNotFound
+			return ErrNotFound
 		}
 		if action == "stop" || action == "restart" {
 			toStop = append(toStop, m.stopLocked(inst))
@@ -352,7 +358,7 @@ func (m *Manager) UpdateTags(action, value string, ids ...string) error {
 	for _, id := range ids {
 		inst := m.instances[id]
 		if inst == nil {
-			return errNotFound
+			return ErrNotFound
 		}
 		fc := &inst.config
 		switch action {
@@ -373,11 +379,11 @@ func (m *Manager) DisconnectPeer(id, endpoint string, peerID uint64) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	inst := m.instances[id]
-	return inst != nil && inst.running != nil && inst.running.disconnectPeer(endpoint, peerID)
+	return inst != nil && inst.running != nil && inst.running.DisconnectPeer(endpoint, peerID)
 }
 
 // RunningForwarder returns the running forwarder with this ID, or nil.
-func (m *Manager) RunningForwarder(id string) *Forwarder {
+func (m *Manager) RunningForwarder(id string) *engine.Forwarder {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if inst := m.instances[id]; inst != nil {
@@ -428,22 +434,22 @@ func (m *Manager) statusLocked(inst *Instance, includePeers bool) ForwarderStatu
 	default:
 		// Running: "degraded" if any endpoint is not connected/listening.
 		status.Health = "ok"
-		input, outputs := inst.running.snapshot(includePeers)
+		input, outputs := inst.running.Snapshot(includePeers)
 		status.InputStatus, status.OutputStatus = &input, outputs
-		totals := inst.running.counters()
+		totals := inst.running.Counters()
 		status.BytesIn, status.BytesOut, status.Messages, status.Drops = totals.BytesIn, totals.BytesOut, totals.Messages, totals.Drops
 		status.ClientsIn = input.PeerCount
-		if !isHealthyState(input.State) {
+		if !engine.IsHealthyState(input.State) {
 			status.Health = "degraded"
 		}
 		for _, output := range outputs {
 			status.ClientsOut += output.PeerCount
-			if !isHealthyState(output.State) {
+			if !engine.IsHealthyState(output.State) {
 				status.Health = "degraded"
 			}
 		}
 		status.Connections = status.ClientsIn + status.ClientsOut
-		if lastData := inst.running.lastDataAt.Load(); lastData > 0 {
+		if lastData := inst.running.LastDataAt(); lastData > 0 {
 			status.LastDataAt = lastData / int64(time.Millisecond)
 		}
 	}
@@ -481,7 +487,7 @@ func (m *Manager) History(id string) (map[string]any, bool) {
 
 // BroadcastForwarders sends the current forwarder list to all open browser tabs.
 func (m *Manager) BroadcastForwarders() {
-	m.liveUpdates.Broadcast("forwarders", m.List())
+	m.LiveUpdates.Broadcast("forwarders", m.List())
 }
 
 // RunSampler calls sample once per second until stop is closed.
@@ -505,7 +511,7 @@ func (m *Manager) sample(now time.Time) {
 	for _, id := range m.instanceOrder {
 		inst := m.instances[id]
 		if fw := inst.running; fw != nil {
-			totals := fw.counters()
+			totals := fw.Counters()
 			if seconds := now.Sub(inst.lastSampleAt).Seconds(); seconds > 0 {
 				inst.rates = Rates{
 					BytesIn:  float64(totals.BytesIn-inst.lastCounters.BytesIn) / seconds,
@@ -522,7 +528,7 @@ func (m *Manager) sample(now time.Time) {
 	}
 	list := m.listLocked()
 	m.mu.Unlock()
-	m.liveUpdates.Broadcast("forwarders", list)
+	m.LiveUpdates.Broadcast("forwarders", list)
 }
 
 // ---- alerts ----
@@ -536,13 +542,13 @@ func (m *Manager) evaluateAlertsLocked(inst *Instance, now time.Time) {
 	case inst.state == "error":
 		downReason = inst.startError
 	case inst.running != nil:
-		input, outputs := inst.running.snapshot(false)
+		input, outputs := inst.running.Snapshot(false)
 		var unhealthy []string
-		if !isHealthyState(input.State) {
+		if !engine.IsHealthyState(input.State) {
 			unhealthy = append(unhealthy, describeUnhealthyEndpoint("input", input))
 		}
 		for _, output := range outputs {
-			if !isHealthyState(output.State) {
+			if !engine.IsHealthyState(output.State) {
 				unhealthy = append(unhealthy, describeUnhealthyEndpoint("output", output))
 			}
 		}
@@ -554,7 +560,7 @@ func (m *Manager) evaluateAlertsLocked(inst *Instance, now time.Time) {
 	isIdle := false
 	var idleFor time.Duration
 	if inst.running != nil && inst.config.IdleAlertSeconds > 0 {
-		lastActivity := max(inst.running.lastDataAt.Load(), inst.running.startedAt.UnixNano())
+		lastActivity := max(inst.running.LastDataAt(), inst.running.StartedAt().UnixNano())
 		idleFor = now.Sub(time.Unix(0, lastActivity)).Truncate(time.Second)
 		isIdle = idleFor >= time.Duration(inst.config.IdleAlertSeconds)*time.Second
 	}
@@ -564,7 +570,7 @@ func (m *Manager) evaluateAlertsLocked(inst *Instance, now time.Time) {
 // describeUnhealthyEndpoint explains an endpoint problem for alerts, e.g.
 // "output tcp-connect 10.0.0.5:2000 is down (connection refused: …)", or with
 // several remote hosts "input tcp-connect: 1 of 3 hosts connected (10.0.0.6:4001: …)".
-func describeUnhealthyEndpoint(role string, status EndpointStatus) string {
+func describeUnhealthyEndpoint(role string, status engine.EndpointStatus) string {
 	text := fmt.Sprintf("%s %s %s is %s", role, status.Mode, status.Address, status.State)
 	if len(status.Connections) > 1 {
 		connectedCount := 0
@@ -618,18 +624,18 @@ func (m *Manager) notifyAlert(inst *Instance, kind string, firing bool, reason s
 	if reason != "" {
 		text += " — " + reason
 	}
-	m.events.Add(level, inst.config.ID, inst.config.Name, text)
+	m.Events.Add(level, inst.config.ID, inst.config.Name, text)
 	if url := m.config.Alerts.WebhookURL; url != "" {
 		payload := map[string]any{
 			"text": text, "content": text, // "text": Slack/Teams/Mattermost, "content": Discord
 			"forwarder": inst.config.Name, "id": inst.config.ID, "alert": kind,
 			"status": status, "detail": reason, "time": time.Now().UTC(),
 		}
-		go m.postWebhook(url, payload) // never block the sampler on the network
+		go m.PostWebhook(url, payload) // never block the sampler on the network
 	}
 }
 
-func (m *Manager) postWebhook(url string, payload any) error {
+func (m *Manager) PostWebhook(url string, payload any) error {
 	body, _ := json.Marshal(payload)
 	resp, err := m.httpClient.Post(url, "application/json", bytes.NewReader(body))
 	if err == nil {
@@ -639,7 +645,7 @@ func (m *Manager) postWebhook(url string, payload any) error {
 		}
 	}
 	if err != nil {
-		m.events.Add("warn", "", "", "webhook failed: "+err.Error())
+		m.Events.Add("warn", "", "", "webhook failed: "+err.Error())
 	}
 	return err
 }
@@ -667,21 +673,6 @@ func (m *Manager) PasswordHash() string {
 // NeedsPasswordSetup is true until the first password has been set.
 func (m *Manager) NeedsPasswordSetup() bool { return m.PasswordHash() == "" }
 
-// InitialSetup is the request body of POST /api/setup: the password and the
-// first settings, entered on the first-start page. Empty or zero fields keep
-// the value from the config file (or its default).
-type InitialSetup struct {
-	Password         string `json:"password"`
-	Port             int    `json:"port"`
-	Bind             string `json:"bind"`
-	DataDir          string `json:"data_dir"`
-	SessionHours     int    `json:"session_hours"`
-	WebhookURL       string `json:"webhook_url"`
-	DownAfterSeconds int    `json:"down_after"`
-	EventLog         string `json:"event_log"`
-	EventLogMaxMB    int    `json:"event_log_max_mb"`
-}
-
 // SetupDefaults returns the values the first-start page is filled with.
 func (m *Manager) SetupDefaults() map[string]any {
 	m.mu.Lock()
@@ -690,7 +681,7 @@ func (m *Manager) SetupDefaults() map[string]any {
 		"port": m.config.Port, "bind": m.config.Bind, "data_dir": m.config.DataDir,
 		"session_hours": m.config.SessionHours, "webhook_url": m.config.Alerts.WebhookURL,
 		"down_after": m.config.Alerts.DownAfterSeconds, "event_log": m.config.EventLog,
-		"event_log_max_mb": m.config.EventLogMaxMB, "config_path": m.configPath, "web_addr": m.webAddress,
+		"event_log_max_mb": m.config.EventLogMaxMB, "config_path": m.configPath, "web_addr": m.WebAddress,
 	}
 }
 
@@ -699,14 +690,14 @@ func (m *Manager) SetupDefaults() map[string]any {
 // to take over. Everything is checked first: either all of it is saved or
 // nothing. restartNeeded is true when the web port or bind address changed,
 // because the web interface keeps its current address until Delta restarts.
-func (m *Manager) CompleteSetup(setup InitialSetup) (restartNeeded bool, err error) {
-	if err := checkNewPassword(setup.Password); err != nil {
+func (m *Manager) CompleteSetup(setup config.InitialSetup) (restartNeeded bool, err error) {
+	if err := config.CheckNewPassword(setup.Password); err != nil {
 		return false, err
 	}
-	if err := validateInitialSetup(&setup); err != nil {
+	if err := config.ValidateInitialSetup(&setup); err != nil {
 		return false, err
 	}
-	hash, err := hashPassword(setup.Password) // slow on purpose; done before taking the lock
+	hash, err := config.HashPassword(setup.Password) // slow on purpose; done before taking the lock
 	if err != nil {
 		return false, err
 	}
@@ -730,7 +721,7 @@ func (m *Manager) CompleteSetup(setup InitialSetup) (restartNeeded bool, err err
 	if setup.DataDir != "" {
 		// Safe without further locking: until the password is set, every API
 		// request is refused, so no capture can be using the old directory.
-		m.config.DataDir, m.dataDir = setup.DataDir, resolveNextToConfig(m.configPath, setup.DataDir)
+		m.config.DataDir, m.dataDir = setup.DataDir, config.ResolvePath(m.configPath, setup.DataDir)
 	}
 	if setup.SessionHours > 0 {
 		m.config.SessionHours = setup.SessionHours
@@ -740,7 +731,7 @@ func (m *Manager) CompleteSetup(setup InitialSetup) (restartNeeded bool, err err
 		m.config.Alerts.DownAfterSeconds = setup.DownAfterSeconds
 	}
 	m.saveLocked()
-	m.events.Add("info", "", "", "first-start setup completed")
+	m.Events.Add("info", "", "", "first-start setup completed")
 	return restartNeeded, nil
 }
 
@@ -755,11 +746,11 @@ func (m *Manager) switchEventLogLocked(configured string, maxMB int) error {
 		maxMB = m.config.EventLogMaxMB
 	}
 	path := resolveEventLogPath(m.configPath, configured)
-	if err := m.events.OpenFile(path, int64(maxMB)<<20); err != nil {
+	if err := m.Events.OpenFile(path, int64(maxMB)<<20); err != nil {
 		return err
 	}
 	if configured != m.config.EventLog {
-		m.events.Add("info", "", "", "event log file: "+cmp.Or(path, "off (memory only)"))
+		m.Events.Add("info", "", "", "event log file: "+cmp.Or(path, "off (memory only)"))
 	}
 	m.config.EventLog, m.config.EventLogMaxMB = configured, maxMB
 	return nil
@@ -777,9 +768,9 @@ func (m *Manager) Settings() map[string]any {
 	defer m.mu.Unlock()
 	return map[string]any{
 		"webhook_url": m.config.Alerts.WebhookURL, "down_after": m.config.Alerts.DownAfterSeconds,
-		"config_path": m.configPath, "data_dir": m.dataDir, "version": version,
-		"event_log": m.config.EventLog, "event_log_max_mb": m.config.EventLogMaxMB, "event_log_path": m.events.FilePath(),
-		"port": m.config.Port, "bind": m.config.Bind, "web_addr": m.webAddress,
+		"config_path": m.configPath, "data_dir": m.dataDir, "version": m.Version,
+		"event_log": m.config.EventLog, "event_log_max_mb": m.config.EventLogMaxMB, "event_log_path": m.Events.FilePath(),
+		"port": m.config.Port, "bind": m.config.Bind, "web_addr": m.WebAddress,
 	}
 }
 
@@ -787,14 +778,14 @@ func (m *Manager) UpdateSettings(update SettingsUpdate) error {
 	// Password hashing is deliberately slow, so it happens before taking the lock.
 	var newHash string
 	if update.NewPassword != "" {
-		if !verifyPassword(update.CurrentPassword, m.PasswordHash()) {
+		if !config.VerifyPassword(update.CurrentPassword, m.PasswordHash()) {
 			return errors.New("current password is wrong")
 		}
-		if err := checkNewPassword(update.NewPassword); err != nil {
+		if err := config.CheckNewPassword(update.NewPassword); err != nil {
 			return err
 		}
 		var err error
-		if newHash, err = hashPassword(update.NewPassword); err != nil {
+		if newHash, err = config.HashPassword(update.NewPassword); err != nil {
 			return err
 		}
 	}
@@ -804,7 +795,7 @@ func (m *Manager) UpdateSettings(update SettingsUpdate) error {
 		configured := ""
 		if update.EventLog != nil {
 			// An emptied field means "back to the default file".
-			configured = cmp.Or(strings.TrimSpace(*update.EventLog), defaultEventLog)
+			configured = cmp.Or(strings.TrimSpace(*update.EventLog), config.DefaultEventLog)
 		}
 		if err := m.switchEventLogLocked(configured, update.EventLogMaxMB); err != nil {
 			return err
@@ -812,7 +803,7 @@ func (m *Manager) UpdateSettings(update SettingsUpdate) error {
 	}
 	if newHash != "" {
 		m.config.PasswordHash = newHash
-		m.events.Add("info", "", "", "password changed")
+		m.Events.Add("info", "", "", "password changed")
 	}
 	if update.DownAfterSeconds > 0 {
 		m.config.Alerts.DownAfterSeconds = update.DownAfterSeconds
@@ -825,10 +816,10 @@ func (m *Manager) UpdateSettings(update SettingsUpdate) error {
 }
 
 // Export returns the configuration of the given forwarders (all if ids is empty).
-func (m *Manager) Export(ids []string) []ForwarderConfig {
+func (m *Manager) Export(ids []string) []config.ForwarderConfig {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	exported := []ForwarderConfig{}
+	exported := []config.ForwarderConfig{}
 	for _, id := range m.instanceOrder {
 		if len(ids) == 0 || slices.Contains(ids, id) {
 			exported = append(exported, m.instances[id].config)
@@ -839,10 +830,10 @@ func (m *Manager) Export(ids []string) []ForwarderConfig {
 
 // Import adds forwarders as new, stopped instances. All of them are validated
 // first, so either all or none are imported.
-func (m *Manager) Import(configs []ForwarderConfig) (int, error) {
+func (m *Manager) Import(configs []config.ForwarderConfig) (int, error) {
 	for i := range configs {
 		configs[i].ID, configs[i].Created, configs[i].Autostart = "", time.Time{}, false
-		if err := configs[i].normalize(); err != nil {
+		if err := configs[i].Normalize(); err != nil {
 			return 0, fmt.Errorf("forwarder %d (%s): %w", i+1, configs[i].Name, err)
 		}
 	}
@@ -851,7 +842,7 @@ func (m *Manager) Import(configs []ForwarderConfig) (int, error) {
 		m.instances[fc.ID] = newInstance(fc)
 		m.instanceOrder = append(m.instanceOrder, fc.ID)
 	}
-	m.events.Add("info", "", "", fmt.Sprintf("imported %d forwarders", len(configs)))
+	m.Events.Add("info", "", "", fmt.Sprintf("imported %d forwarders", len(configs)))
 	m.saveLocked()
 	m.mu.Unlock()
 	m.BroadcastForwarders()
@@ -862,7 +853,7 @@ func (m *Manager) Import(configs []ForwarderConfig) (int, error) {
 // they come back the next time Delta starts.
 func (m *Manager) Shutdown() {
 	m.mu.Lock()
-	var toStop []*Forwarder
+	var toStop []*engine.Forwarder
 	for _, inst := range m.instances {
 		if inst.capture != nil {
 			inst.capture.stop()

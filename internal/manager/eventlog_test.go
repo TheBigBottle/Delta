@@ -1,4 +1,4 @@
-package main
+package manager
 
 import (
 	"os"
@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"delta/internal/config"
 )
 
 // Events survive a restart: they are appended to the log file and loaded
@@ -68,7 +70,7 @@ func TestEventLogRotation(t *testing.T) {
 // "off" switches the file off; relative paths are next to the config file.
 func TestResolveEventLogPath(t *testing.T) {
 	cases := map[string]string{
-		"":             "/etc/delta/" + defaultEventLog,
+		"":             "/etc/delta/" + config.DefaultEventLog,
 		"OFF":          "",
 		"logs/ev.log":  "/etc/delta/logs/ev.log",
 		"/var/log/d.l": "/var/log/d.l",

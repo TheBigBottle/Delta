@@ -1,4 +1,4 @@
-package main
+package manager
 
 // Captures record the data a forwarder receives into a file, with timestamps,
 // so it can be downloaded or replayed later into any running forwarder.
@@ -28,6 +28,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"delta/internal/engine"
 )
 
 const dcapMagic = "DCAP1\n"
@@ -84,7 +86,7 @@ func (m *Manager) StartCapture(id string, maxSeconds int, maxMegabytes int) (Cap
 	inst := m.instances[id]
 	switch {
 	case inst == nil:
-		return CaptureStatus{}, errNotFound
+		return CaptureStatus{}, ErrNotFound
 	case inst.running == nil:
 		return CaptureStatus{}, errors.New("forwarder is not running")
 	case inst.capture != nil:
@@ -104,8 +106,8 @@ func (m *Manager) StartCapture(id string, maxSeconds int, maxMegabytes int) (Cap
 	inst.capture = job
 	fw := inst.running
 	// A large buffer so short bursts are not lost while the disk is busy.
-	tapped := fw.taps.subscribe(65536)
-	m.events.Add("info", id, inst.config.Name, "capture started: "+fileName)
+	tapped := fw.Subscribe(65536)
+	m.Events.Add("info", id, inst.config.Name, "capture started: "+fileName)
 
 	var timeLimit <-chan time.Time // nil channel = no time limit
 	if maxSeconds > 0 {
@@ -114,7 +116,7 @@ func (m *Manager) StartCapture(id string, maxSeconds int, maxMegabytes int) (Cap
 	maxBytes := int64(maxMegabytes) << 20
 
 	backgroundJobs.Go(func() {
-		defer fw.taps.unsubscribe(tapped)
+		defer fw.Unsubscribe(tapped)
 		writer := bufio.NewWriterSize(file, 256<<10)
 		writer.WriteString(dcapMagic)
 		startNanos := startedAt.UnixNano()
@@ -156,9 +158,9 @@ func (m *Manager) StartCapture(id string, maxSeconds int, maxMegabytes int) (Cap
 		}
 		m.mu.Unlock()
 		if writeErr != nil {
-			m.events.Add("error", id, inst.config.Name, "capture "+fileName+" failed: "+writeErr.Error())
+			m.Events.Add("error", id, inst.config.Name, "capture "+fileName+" failed: "+writeErr.Error())
 		} else {
-			m.events.Add("info", id, inst.config.Name, fmt.Sprintf("capture saved: %s (%d records, %d bytes)", fileName, job.recordCount.Load(), job.byteCount.Load()))
+			m.Events.Add("info", id, inst.config.Name, fmt.Sprintf("capture saved: %s (%d records, %d bytes)", fileName, job.recordCount.Load(), job.byteCount.Load()))
 		}
 		m.BroadcastForwarders()
 	})
@@ -170,7 +172,7 @@ func (m *Manager) StopCapture(id string) error {
 	defer m.mu.Unlock()
 	inst := m.instances[id]
 	if inst == nil {
-		return errNotFound
+		return ErrNotFound
 	}
 	if inst.capture == nil {
 		return errors.New("no capture running")
@@ -247,8 +249,8 @@ func (d *dcapReader) next() (offsetNanos int64, source string, data []byte, err 
 	return offsetNanos, string(sourceBytes), data, nil
 }
 
-// readDcap calls handleRecord for every record of a .dcap file.
-func readDcap(r io.Reader, handleRecord func(offsetNanos int64, source string, data []byte) error) error {
+// ReadDcap calls handleRecord for every record of a .dcap file.
+func ReadDcap(r io.Reader, handleRecord func(offsetNanos int64, source string, data []byte) error) error {
 	records, err := newDcapReader(r)
 	if err != nil {
 		return err
@@ -269,7 +271,7 @@ func readDcap(r io.Reader, handleRecord func(offsetNanos int64, source string, d
 
 // CapturePage is one page of records for the capture viewer.
 type CapturePage struct {
-	Records  []inspectedMessage `json:"records"`
+	Records  []InspectedMessage `json:"records"`
 	Next     int64              `json:"next"`     // byte position for the next page; -1 = end of file
 	Position int64              `json:"position"` // bytes of the file read so far (for a progress bar)
 	FileSize int64              `json:"file_size"`
@@ -286,7 +288,7 @@ const (
 // ReadCapturePage reads up to limit records that match the filter (nil =
 // all), starting at byte position from (0 = first record).
 func (m *Manager) ReadCapturePage(name string, from int64, limit, previewBytes int, matches func([]byte) bool) (CapturePage, error) {
-	path, err := m.capturePath(name)
+	path, err := m.CapturePath(name)
 	if err != nil {
 		return CapturePage{}, err
 	}
@@ -310,7 +312,7 @@ func (m *Manager) ReadCapturePage(name string, from int64, limit, previewBytes i
 		records = &dcapReader{reader: bufio.NewReaderSize(file, 256<<10), position: from}
 	}
 
-	page := CapturePage{Records: []inspectedMessage{}, FileSize: info.Size()}
+	page := CapturePage{Records: []InspectedMessage{}, FileSize: info.Size()}
 	startPosition := records.position
 	for len(page.Records) < limit {
 		if page.Scanned >= maxRecordsScannedPerPage || records.position-startPosition >= maxBytesScannedPerPage {
@@ -328,19 +330,19 @@ func (m *Manager) ReadCapturePage(name string, from int64, limit, previewBytes i
 		if matches != nil && !matches(data) {
 			continue
 		}
-		page.Records = append(page.Records, inspectedMessage{
+		page.Records = append(page.Records, InspectedMessage{
 			TimeMillis: float64(offsetNanos) / float64(time.Millisecond),
-			Source:     source, Length: len(data), Data: previewOf(data, previewBytes),
+			Source:     source, Length: len(data), Data: PreviewOf(data, previewBytes),
 		})
 	}
 	page.Next, page.Position = records.position, records.position
 	return page, nil
 }
 
-// parseRecordFilter builds the capture viewer's search function: "/…/flags"
+// ParseRecordFilter builds the capture viewer's search function: "/…/flags"
 // is a regular expression (flag i = ignore case), any other text a
 // case-insensitive substring. An empty filter returns nil (everything matches).
-func parseRecordFilter(filter string) (func([]byte) bool, error) {
+func ParseRecordFilter(filter string) (func([]byte) bool, error) {
 	if filter == "" {
 		return nil, nil
 	}
@@ -398,9 +400,9 @@ func (m *Manager) CaptureFiles() ([]CaptureFile, error) {
 	return files, nil
 }
 
-// capturePath returns the full path of a capture file. The name is checked
+// CapturePath returns the full path of a capture file. The name is checked
 // strictly, so a request cannot reach files outside the capture directory.
-func (m *Manager) capturePath(name string) (string, error) {
+func (m *Manager) CapturePath(name string) (string, error) {
 	if !validCaptureName.MatchString(name) {
 		return "", errors.New("invalid capture name")
 	}
@@ -408,7 +410,7 @@ func (m *Manager) capturePath(name string) (string, error) {
 }
 
 func (m *Manager) DeleteCapture(name string) error {
-	path, err := m.capturePath(name)
+	path, err := m.CapturePath(name)
 	if err != nil {
 		return err
 	}
@@ -499,7 +501,7 @@ type ReplayOptions struct {
 // StartReplay feeds a capture into a running forwarder, as if its input had
 // received the data. All of the forwarder's outputs get it.
 func (m *Manager) StartReplay(captureName string, options ReplayOptions) error {
-	path, err := m.capturePath(captureName)
+	path, err := m.CapturePath(captureName)
 	if err != nil {
 		return err
 	}
@@ -511,7 +513,7 @@ func (m *Manager) StartReplay(captureName string, options ReplayOptions) error {
 	inst := m.instances[options.ForwarderID]
 	switch {
 	case inst == nil:
-		return errNotFound
+		return ErrNotFound
 	case inst.running == nil:
 		return errors.New("forwarder is not running")
 	case inst.replay != nil:
@@ -523,7 +525,7 @@ func (m *Manager) StartReplay(captureName string, options ReplayOptions) error {
 	}
 	inst.replay = job
 	fw := inst.running
-	m.events.Add("info", inst.config.ID, inst.config.Name, "replay started: "+captureName)
+	m.Events.Add("info", inst.config.ID, inst.config.Name, "replay started: "+captureName)
 
 	backgroundJobs.Go(func() {
 		err := replayCaptureFile(path, fw, job, options)
@@ -536,7 +538,7 @@ func (m *Manager) StartReplay(captureName string, options ReplayOptions) error {
 		if err != nil {
 			message = "replay " + captureName + " failed: " + err.Error()
 		}
-		m.events.Add("info", inst.config.ID, inst.config.Name, message)
+		m.Events.Add("info", inst.config.ID, inst.config.Name, message)
 		m.BroadcastForwarders()
 	})
 	return nil
@@ -544,7 +546,7 @@ func (m *Manager) StartReplay(captureName string, options ReplayOptions) error {
 
 var errReplayStopped = errors.New("replay stopped")
 
-func replayCaptureFile(path string, fw *Forwarder, job *replayJob, options ReplayOptions) error {
+func replayCaptureFile(path string, fw *engine.Forwarder, job *replayJob, options ReplayOptions) error {
 	// wait pauses for d, or returns errReplayStopped if the replay or the forwarder is stopped.
 	wait := func(d time.Duration) error {
 		if d <= 0 {
@@ -556,7 +558,7 @@ func replayCaptureFile(path string, fw *Forwarder, job *replayJob, options Repla
 		case <-timer.C:
 			return nil
 		case <-job.stopSignal:
-		case <-fw.ctx.Done():
+		case <-fw.Done():
 		}
 		return errReplayStopped
 	}
@@ -567,11 +569,11 @@ func replayCaptureFile(path string, fw *Forwarder, job *replayJob, options Repla
 			return err
 		}
 		passStartedAt, firstOffset := time.Now(), int64(-1)
-		err = readDcap(file, func(offsetNanos int64, _ string, data []byte) error {
+		err = ReadDcap(file, func(offsetNanos int64, _ string, data []byte) error {
 			select {
 			case <-job.stopSignal:
 				return errReplayStopped
-			case <-fw.ctx.Done():
+			case <-fw.Done():
 				return errReplayStopped
 			default:
 			}
@@ -591,7 +593,7 @@ func replayCaptureFile(path string, fw *Forwarder, job *replayJob, options Repla
 					return err
 				}
 			}
-			fw.dispatch(data, "replay")
+			fw.Dispatch(data, "replay")
 			job.sentCount.Add(1)
 			return nil
 		})
@@ -603,4 +605,35 @@ func replayCaptureFile(path string, fw *Forwarder, job *replayJob, options Repla
 			return err
 		}
 	}
+}
+
+// StopReplay stops the replay running into a forwarder.
+func (m *Manager) StopReplay(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	inst := m.instances[id]
+	if inst == nil {
+		return ErrNotFound
+	}
+	if inst.replay == nil {
+		return errors.New("no replay running")
+	}
+	inst.replay.stop()
+	return nil
+}
+
+// InspectedMessage is one row of the live inspector or the capture viewer.
+type InspectedMessage struct {
+	TimeMillis float64 `json:"t"` // live: unix ms; capture: ms since the capture started
+	Source     string  `json:"s"`
+	Length     int     `json:"n"` // full length; Data may be shortened
+	Data       []byte  `json:"d"` // the first previewBytes bytes, base64 in JSON
+}
+
+// PreviewOf returns the first previewBytes bytes of data (all of it if shorter).
+func PreviewOf(data []byte, previewBytes int) []byte {
+	if len(data) > previewBytes {
+		return data[:previewBytes]
+	}
+	return data
 }

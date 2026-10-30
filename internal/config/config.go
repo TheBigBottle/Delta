@@ -1,4 +1,6 @@
-package main
+// Package config defines Delta's config file (settings and forwarders):
+// its JSON format, validation, atomic saving, and password hashing.
+package config
 
 // This file defines the configuration file format and how it is loaded,
 // validated and saved. Delta keeps everything in one JSON file: the web
@@ -28,9 +30,9 @@ const (
 	defaultDataDir      = "delta-data"
 	defaultSessionHours = 24
 	defaultDownAfterSec = 30
-	defaultEventLog     = "delta-events.log"
+	DefaultEventLog     = "delta-events.log"
 	defaultEventLogMB   = 10
-	eventLogOff         = "off" // event_log value that switches the log file off
+	EventLogOff         = "off" // event_log value that switches the log file off
 )
 
 // Config is the content of the config file.
@@ -65,7 +67,7 @@ type ForwarderConfig struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 	// LegacyGroup only exists so that config files and backups from versions
-	// with forwarder groups still load. The value is dropped by normalize.
+	// with forwarder groups still load. The value is dropped by Normalize.
 	LegacyGroup      string           `json:"group,omitempty"`
 	Tags             []string         `json:"tags"`
 	Comment          string           `json:"comment,omitempty"`    // free-text notes, shown in the UI only
@@ -109,12 +111,12 @@ var (
 )
 
 // address returns "host:port", the form the net package expects.
-func (ep EndpointConfig) address() string { return net.JoinHostPort(ep.Host, strconv.Itoa(ep.Port)) }
+func (ep EndpointConfig) Address() string { return net.JoinHostPort(ep.Host, strconv.Itoa(ep.Port)) }
 
 // connectAddresses returns every remote address of a tcp-connect endpoint:
 // Host:Port first, then the additional targets.
-func (ep EndpointConfig) connectAddresses() []string {
-	addresses := []string{ep.address()}
+func (ep EndpointConfig) ConnectAddresses() []string {
+	addresses := []string{ep.Address()}
 	for _, target := range ep.Targets {
 		addresses = append(addresses, net.JoinHostPort(target.Host, strconv.Itoa(target.Port)))
 	}
@@ -122,7 +124,7 @@ func (ep EndpointConfig) connectAddresses() []string {
 }
 
 // queueSizeOr returns the configured queue size, or fallback if none is set.
-func (ep EndpointConfig) queueSizeOr(fallback int) int {
+func (ep EndpointConfig) QueueSizeOr(fallback int) int {
 	if ep.QueueSize > 0 {
 		return ep.QueueSize
 	}
@@ -168,7 +170,7 @@ func (ep *EndpointConfig) validate(isInput bool) error {
 	if len(ep.Targets) > maxConnectTargets {
 		return fmt.Errorf("at most %d additional hosts", maxConnectTargets)
 	}
-	seenAddresses := map[string]bool{ep.address(): true}
+	seenAddresses := map[string]bool{ep.Address(): true}
 	for i := range ep.Targets {
 		target := &ep.Targets[i]
 		target.Host = strings.TrimSpace(target.Host)
@@ -191,9 +193,9 @@ func (ep *EndpointConfig) validate(isInput bool) error {
 // live updates (which carry the comment every second) stay small.
 const maxCommentLength = 4000
 
-// normalize validates a forwarder, trims text fields, removes duplicate tags
+// Normalize validates a forwarder, trims text fields, removes duplicate tags
 // and fills in the ID and creation time if they are missing.
-func (fc *ForwarderConfig) normalize() error {
+func (fc *ForwarderConfig) Normalize() error {
 	fc.Name = strings.TrimSpace(fc.Name)
 	fc.LegacyGroup = "" // groups were removed; see LegacyGroup
 	fc.Comment = strings.TrimSpace(fc.Comment)
@@ -249,7 +251,7 @@ func defaultConfig() *Config {
 	return &Config{
 		Port:          defaultWebPort,
 		DataDir:       defaultDataDir,
-		EventLog:      defaultEventLog,
+		EventLog:      DefaultEventLog,
 		EventLogMaxMB: defaultEventLogMB,
 		SessionHours:  defaultSessionHours,
 		Alerts:        AlertConfig{DownAfterSeconds: defaultDownAfterSec},
@@ -257,10 +259,10 @@ func defaultConfig() *Config {
 	}
 }
 
-// loadConfig reads and validates the config file. If the file does not exist
+// Load reads and validates the config file. If the file does not exist
 // it is created (without a password; the web interface asks for one).
 // A plain text password found in the file is replaced by its hash.
-func loadConfig(path string) (cfg *Config, err error) {
+func Load(path string) (cfg *Config, err error) {
 	cfg = defaultConfig()
 	data, err := os.ReadFile(path)
 	fileIsNew := errors.Is(err, fs.ErrNotExist)
@@ -277,10 +279,10 @@ func loadConfig(path string) (cfg *Config, err error) {
 
 	passwordWasPlainText := cfg.Password != ""
 	if passwordWasPlainText {
-		if err := checkNewPassword(cfg.Password); err != nil {
+		if err := CheckNewPassword(cfg.Password); err != nil {
 			return nil, fmt.Errorf("%s: password: %w", path, err)
 		}
-		if cfg.PasswordHash, err = hashPassword(cfg.Password); err != nil {
+		if cfg.PasswordHash, err = HashPassword(cfg.Password); err != nil {
 			return nil, err
 		}
 		cfg.Password = ""
@@ -293,7 +295,7 @@ func loadConfig(path string) (cfg *Config, err error) {
 	}
 	cfg.EventLog = strings.TrimSpace(cfg.EventLog)
 	if cfg.EventLog == "" {
-		cfg.EventLog = defaultEventLog
+		cfg.EventLog = DefaultEventLog
 	}
 	if cfg.EventLogMaxMB <= 0 {
 		cfg.EventLogMaxMB = defaultEventLogMB
@@ -311,7 +313,7 @@ func loadConfig(path string) (cfg *Config, err error) {
 	seenIDs := map[string]bool{}
 	for i := range cfg.Forwarders {
 		fc := &cfg.Forwarders[i]
-		if err := fc.normalize(); err != nil {
+		if err := fc.Normalize(); err != nil {
 			return nil, fmt.Errorf("%s: forwarder %q: %w", path, fc.Name, err)
 		}
 		if seenIDs[fc.ID] {
@@ -321,17 +323,17 @@ func loadConfig(path string) (cfg *Config, err error) {
 	}
 
 	if fileIsNew || passwordWasPlainText {
-		if err := saveConfig(path, cfg); err != nil {
+		if err := Save(path, cfg); err != nil {
 			return nil, err
 		}
 	}
 	return cfg, nil
 }
 
-// saveConfig writes the config atomically: it writes a temporary file next to
+// Save writes the config atomically: it writes a temporary file next to
 // the real one and renames it, so a crash never leaves a half-written file.
 // The file is only readable by its owner (it contains the password hash).
-func saveConfig(path string, cfg *Config) error {
+func Save(path string, cfg *Config) error {
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
@@ -360,26 +362,26 @@ func saveConfig(path string, cfg *Config) error {
 	return os.Rename(tmpFile.Name(), path)
 }
 
-func newForwarderID() string { return "f" + randomHex(6) }
+func newForwarderID() string { return "f" + RandomHex(6) }
 
-// randomHex returns n random bytes as a hex string (2n characters).
-func randomHex(n int) string {
+// RandomHex returns n random bytes as a hex string (2n characters).
+func RandomHex(n int) string {
 	b := make([]byte, n)
 	rand.Read(b)
 	return hex.EncodeToString(b)
 }
 
-// resolveNextToConfig resolves a relative path (data_dir, event_log)
+// ResolvePath resolves a relative path (data_dir, event_log)
 // against the directory of the config file.
-func resolveNextToConfig(configPath, path string) string {
+func ResolvePath(configPath, path string) string {
 	if filepath.IsAbs(path) {
 		return path
 	}
 	return filepath.Join(filepath.Dir(configPath), path)
 }
 
-// validateInitialSetup checks and trims the settings entered on the first-start page.
-func validateInitialSetup(setup *InitialSetup) error {
+// ValidateInitialSetup checks and trims the settings entered on the first-start page.
+func ValidateInitialSetup(setup *InitialSetup) error {
 	setup.Bind = strings.TrimSpace(setup.Bind)
 	setup.DataDir = strings.TrimSpace(setup.DataDir)
 	setup.WebhookURL = strings.TrimSpace(setup.WebhookURL)
@@ -403,4 +405,19 @@ func validateInitialSetup(setup *InitialSetup) error {
 		}
 	}
 	return nil
+}
+
+// InitialSetup is the request body of POST /api/setup: the password and the
+// first settings, entered on the first-start page. Empty or zero fields keep
+// the value from the config file (or its default).
+type InitialSetup struct {
+	Password         string `json:"password"`
+	Port             int    `json:"port"`
+	Bind             string `json:"bind"`
+	DataDir          string `json:"data_dir"`
+	SessionHours     int    `json:"session_hours"`
+	WebhookURL       string `json:"webhook_url"`
+	DownAfterSeconds int    `json:"down_after"`
+	EventLog         string `json:"event_log"`
+	EventLogMaxMB    int    `json:"event_log_max_mb"`
 }

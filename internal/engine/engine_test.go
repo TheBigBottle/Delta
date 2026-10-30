@@ -1,8 +1,7 @@
-package main
+package engine
 
 import (
 	"bufio"
-	"encoding/json"
 	"net"
 	"runtime"
 	"sort"
@@ -10,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"delta/internal/config"
 )
 
 func freePort(t testing.TB) int {
@@ -23,13 +24,13 @@ func freePort(t testing.TB) int {
 
 func addr(port int) string { return "127.0.0.1:" + strconv.Itoa(port) }
 
-func start(t testing.TB, cfg ForwarderConfig) *Forwarder {
+func start(t testing.TB, cfg config.ForwarderConfig) *Forwarder {
 	t.Helper()
 	cfg.Name = "test"
-	if err := cfg.normalize(); err != nil {
+	if err := cfg.Normalize(); err != nil {
 		t.Fatal(err)
 	}
-	fw, err := startForwarder(cfg, func(level, msg string) { t.Logf("[%s] %s", level, msg) })
+	fw, err := Start(cfg, func(level, msg string) { t.Logf("[%s] %s", level, msg) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,10 +70,10 @@ func TestFanOutLines(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer udp.Close()
-	fw := start(t, ForwarderConfig{
+	fw := start(t, config.ForwarderConfig{
 		Framing: "lines",
-		Input:   EndpointConfig{Mode: "tcp-listen", Host: "127.0.0.1", Port: in},
-		Outputs: []EndpointConfig{
+		Input:   config.EndpointConfig{Mode: "tcp-listen", Host: "127.0.0.1", Port: in},
+		Outputs: []config.EndpointConfig{
 			{Mode: "tcp-listen", Host: "127.0.0.1", Port: out},
 			{Mode: "udp-send", Host: "127.0.0.1", Port: udp.LocalAddr().(*net.UDPAddr).Port},
 		},
@@ -113,9 +114,9 @@ func TestFanOutLines(t *testing.T) {
 // buffered data once the target appears; it reconnects after the target closes.
 func TestOutputReconnectBuffers(t *testing.T) {
 	in, target := freePort(t), freePort(t)
-	fw := start(t, ForwarderConfig{
-		Input:   EndpointConfig{Mode: "udp-listen", Host: "127.0.0.1", Port: in},
-		Outputs: []EndpointConfig{{Mode: "tcp-connect", Host: "127.0.0.1", Port: target}},
+	fw := start(t, config.ForwarderConfig{
+		Input:   config.EndpointConfig{Mode: "udp-listen", Host: "127.0.0.1", Port: in},
+		Outputs: []config.EndpointConfig{{Mode: "tcp-connect", Host: "127.0.0.1", Port: target}},
 	})
 	src, err := net.Dial("udp", addr(in))
 	if err != nil {
@@ -166,9 +167,9 @@ func TestInputReconnect(t *testing.T) {
 	}
 	defer srcLn.Close()
 	out := freePort(t)
-	fw := start(t, ForwarderConfig{
-		Input:   EndpointConfig{Mode: "tcp-connect", Host: "127.0.0.1", Port: srcLn.Addr().(*net.TCPAddr).Port},
-		Outputs: []EndpointConfig{{Mode: "tcp-listen", Host: "127.0.0.1", Port: out}},
+	fw := start(t, config.ForwarderConfig{
+		Input:   config.EndpointConfig{Mode: "tcp-connect", Host: "127.0.0.1", Port: srcLn.Addr().(*net.TCPAddr).Port},
+		Outputs: []config.EndpointConfig{{Mode: "tcp-listen", Host: "127.0.0.1", Port: out}},
 	})
 	client := dialRetry(t, "tcp", addr(out))
 	defer client.Close()
@@ -195,9 +196,9 @@ func TestInputReconnect(t *testing.T) {
 // A client that stops reading must not block the forwarder or other clients.
 func TestSlowClientDoesNotBlock(t *testing.T) {
 	in, out := freePort(t), freePort(t)
-	fw := start(t, ForwarderConfig{
-		Input:   EndpointConfig{Mode: "udp-listen", Host: "127.0.0.1", Port: in},
-		Outputs: []EndpointConfig{{Mode: "tcp-listen", Host: "127.0.0.1", Port: out, QueueSize: 64}},
+	fw := start(t, config.ForwarderConfig{
+		Input:   config.EndpointConfig{Mode: "udp-listen", Host: "127.0.0.1", Port: in},
+		Outputs: []config.EndpointConfig{{Mode: "tcp-listen", Host: "127.0.0.1", Port: out, QueueSize: 64}},
 	})
 	stuck := dialRetry(t, "tcp", addr(out)) // never reads
 	defer stuck.Close()
@@ -240,13 +241,13 @@ func TestSlowClientDoesNotBlock(t *testing.T) {
 func TestStopReleases(t *testing.T) {
 	before := runtime.NumGoroutine()
 	in, out := freePort(t), freePort(t)
-	cfg := ForwarderConfig{Name: "x",
-		Input:   EndpointConfig{Mode: "tcp-listen", Host: "127.0.0.1", Port: in},
-		Outputs: []EndpointConfig{{Mode: "tcp-listen", Host: "127.0.0.1", Port: out}},
+	cfg := config.ForwarderConfig{Name: "x",
+		Input:   config.EndpointConfig{Mode: "tcp-listen", Host: "127.0.0.1", Port: in},
+		Outputs: []config.EndpointConfig{{Mode: "tcp-listen", Host: "127.0.0.1", Port: out}},
 	}
-	cfg.normalize()
+	cfg.Normalize()
 	for i := 0; i < 3; i++ {
-		fw, err := startForwarder(cfg, func(string, string) {})
+		fw, err := Start(cfg, func(string, string) {})
 		if err != nil {
 			t.Fatalf("start %d: %v", i, err)
 		}
@@ -263,10 +264,10 @@ func TestStopReleases(t *testing.T) {
 // TestLatency measures the time Delta adds between a TCP source and a TCP client.
 func TestLatency(t *testing.T) {
 	in, out := freePort(t), freePort(t)
-	fw := start(t, ForwarderConfig{
+	fw := start(t, config.ForwarderConfig{
 		Framing: "lines",
-		Input:   EndpointConfig{Mode: "tcp-listen", Host: "127.0.0.1", Port: in},
-		Outputs: []EndpointConfig{{Mode: "tcp-listen", Host: "127.0.0.1", Port: out}},
+		Input:   config.EndpointConfig{Mode: "tcp-listen", Host: "127.0.0.1", Port: in},
+		Outputs: []config.EndpointConfig{{Mode: "tcp-listen", Host: "127.0.0.1", Port: out}},
 	})
 	client := dialRetry(t, "tcp", addr(out))
 	defer client.Close()
@@ -289,31 +290,6 @@ func TestLatency(t *testing.T) {
 		lat[len(lat)/2], lat[len(lat)*99/100], lat[len(lat)-1])
 }
 
-// Regression test: a forwarder created without tags must still have a "tags"
-// list in its JSON, otherwise the web interface cannot render the list.
-func TestCreatedForwarderHasTagList(t *testing.T) {
-	dir := t.TempDir()
-	cfg, err := loadConfig(dir + "/delta.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	m := newManager(dir+"/delta.json", cfg)
-	status, err := m.Create(ForwarderConfig{
-		Name:    "no tags",
-		Input:   EndpointConfig{Mode: "udp-listen", Port: freePort(t)},
-		Outputs: []EndpointConfig{{Mode: "udp-send", Host: "127.0.0.1", Port: 9}},
-	}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, v := range []any{status, m.List()[0]} {
-		data, _ := json.Marshal(v)
-		if !strings.Contains(string(data), `"tags":[]`) {
-			t.Fatalf("tags missing in %s", data)
-		}
-	}
-}
-
 // A tcp-connect input with several remote hosts merges their data, and a
 // tcp-connect output with several hosts sends a copy to each. A host that is
 // down makes the endpoint "partial", buffers its own data and gets it once it
@@ -332,12 +308,12 @@ func TestMultipleConnectTargets(t *testing.T) {
 	targetA, targetAPort := listen()
 	targetBPort := freePort(t) // nothing listens here yet: this target starts "down"
 
-	fw := start(t, ForwarderConfig{
+	fw := start(t, config.ForwarderConfig{
 		Framing: "lines",
-		Input: EndpointConfig{Mode: "tcp-connect", Host: "127.0.0.1", Port: sourceAPort,
-			Targets: []RemoteTarget{{Host: "127.0.0.1", Port: sourceBPort}}},
-		Outputs: []EndpointConfig{{Mode: "tcp-connect", Host: "127.0.0.1", Port: targetAPort,
-			Targets: []RemoteTarget{{Host: "127.0.0.1", Port: targetBPort}}}},
+		Input: config.EndpointConfig{Mode: "tcp-connect", Host: "127.0.0.1", Port: sourceAPort,
+			Targets: []config.RemoteTarget{{Host: "127.0.0.1", Port: sourceBPort}}},
+		Outputs: []config.EndpointConfig{{Mode: "tcp-connect", Host: "127.0.0.1", Port: targetAPort,
+			Targets: []config.RemoteTarget{{Host: "127.0.0.1", Port: targetBPort}}}},
 	})
 
 	accept := func(ln net.Listener) net.Conn {

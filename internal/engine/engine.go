@@ -1,11 +1,13 @@
-package main
+// Package engine is the data path: it runs one forwarder, receiving data on
+// its input and copying every message to all of its outputs.
+package engine
 
 // This file is the data path of Delta: it receives data on a forwarder's
 // input and copies it to all of its outputs.
 //
 // How data flows through a running forwarder:
 //
-//	input endpoint ──read──► framer ──► Forwarder.dispatch ──► output queue ──► writer goroutine ──► network
+//	input endpoint ──read──► framer ──► Forwarder.Dispatch ──► output queue ──► writer goroutine ──► network
 //	                                         │                   (one per output, or one per
 //	                                         │                    connected client for tcp-listen)
 //	                                         └──► taps (inspector / capture), only while someone watches
@@ -37,6 +39,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"delta/internal/config"
 )
 
 const (
@@ -85,7 +89,7 @@ func (peer *Peer) countBytes(n int) {
 // endpointRuntime is the live state of one endpoint (the input or one output).
 // The counters are atomics because they are updated on the hot path.
 type endpointRuntime struct {
-	config         EndpointConfig
+	config         config.EndpointConfig
 	byteCount      atomic.Uint64
 	messageCount   atomic.Uint64
 	dropCount      atomic.Uint64
@@ -108,14 +112,14 @@ type remoteConnection struct {
 	lastError string
 }
 
-func newEndpointRuntime(config EndpointConfig) endpointRuntime {
+func newEndpointRuntime(endpointConfig config.EndpointConfig) endpointRuntime {
 	var connections []*remoteConnection
-	if config.Mode == "tcp-connect" {
-		for _, address := range config.connectAddresses() {
+	if endpointConfig.Mode == "tcp-connect" {
+		for _, address := range endpointConfig.ConnectAddresses() {
 			connections = append(connections, &remoteConnection{address: address, state: "connecting"})
 		}
 	}
-	return endpointRuntime{config: config, peers: map[uint64]*Peer{}, connections: connections}
+	return endpointRuntime{config: endpointConfig, peers: map[uint64]*Peer{}, connections: connections}
 }
 
 // setConnectionState records the state of one remote connection and derives
@@ -258,7 +262,7 @@ type ConnectionStatus struct {
 // requested, because it can be long and the live stream does not need it.
 func (ep *endpointRuntime) snapshot(includePeers bool) EndpointStatus {
 	status := EndpointStatus{
-		Name: ep.config.Name, Mode: ep.config.Mode, Address: ep.config.address(),
+		Name: ep.config.Name, Mode: ep.config.Mode, Address: ep.config.Address(),
 		Bytes: ep.byteCount.Load(), Messages: ep.messageCount.Load(), Drops: ep.dropCount.Load(),
 		Errors: ep.errorCount.Load(), Reconnects: ep.reconnectCount.Load(),
 	}
@@ -287,8 +291,8 @@ func (ep *endpointRuntime) snapshot(includePeers bool) EndpointStatus {
 	return status
 }
 
-// isHealthyState reports whether an endpoint state means "working as intended".
-func isHealthyState(state string) bool {
+// IsHealthyState reports whether an endpoint state means "working as intended".
+func IsHealthyState(state string) bool {
 	switch state {
 	case "listening", "connected", "open", "receiving", "sending": // "partial" is not: some hosts are missing
 		return true
@@ -358,7 +362,7 @@ func enqueueDropOldest(queue chan []byte, message []byte) bool {
 }
 
 // tapHub distributes copies of the passing data to watchers (the live
-// inspector and captures). It costs nothing while nobody watches: dispatch
+// inspector and captures). It costs nothing while nobody watches: Dispatch
 // only checks one atomic counter.
 type tapHub struct {
 	watcherCount atomic.Int32
@@ -399,9 +403,9 @@ func (hub *tapHub) publish(message TappedMessage) {
 }
 
 // Forwarder is one running forwarder instance. It is created by
-// startForwarder and runs until Stop is called.
+// Start and runs until Stop is called.
 type Forwarder struct {
-	config     ForwarderConfig
+	config     config.ForwarderConfig
 	ctx        context.Context // cancelled by Stop; every goroutine watches it
 	cancel     context.CancelFunc
 	workers    sync.WaitGroup
@@ -413,13 +417,32 @@ type Forwarder struct {
 	logEvent   func(level, message string)
 }
 
-// startForwarder opens all listening sockets right away, so problems such as
+// Done is closed when the forwarder is stopped.
+func (fw *Forwarder) Done() <-chan struct{} { return fw.ctx.Done() }
+
+// Subscribe starts a tap: it receives a copy of every message until
+// Unsubscribe is called. A slow reader misses messages instead of slowing
+// down forwarding (see tapHub).
+func (fw *Forwarder) Subscribe(bufferSize int) chan TappedMessage {
+	return fw.taps.subscribe(bufferSize)
+}
+
+// Unsubscribe ends a tap started with Subscribe.
+func (fw *Forwarder) Unsubscribe(tapped chan TappedMessage) { fw.taps.unsubscribe(tapped) }
+
+// LastDataAt returns when the last message was received (unix nanoseconds, 0 = never).
+func (fw *Forwarder) LastDataAt() int64 { return fw.lastDataAt.Load() }
+
+// StartedAt returns when the forwarder was started.
+func (fw *Forwarder) StartedAt() time.Time { return fw.startedAt }
+
+// Start opens all listening sockets right away, so problems such as
 // "address already in use" are reported to the caller immediately, and then
 // starts one worker goroutine per endpoint.
-func startForwarder(config ForwarderConfig, logEvent func(level, message string)) (*Forwarder, error) {
+func Start(forwarderConfig config.ForwarderConfig, logEvent func(level, message string)) (*Forwarder, error) {
 	ctx, cancel := context.WithCancel(context.Background())
-	inputRuntime := newEndpointRuntime(config.Input)
-	fw := &Forwarder{config: config, ctx: ctx, cancel: cancel, startedAt: time.Now(), logEvent: logEvent, input: &inputRuntime}
+	inputRuntime := newEndpointRuntime(forwarderConfig.Input)
+	fw := &Forwarder{config: forwarderConfig, ctx: ctx, cancel: cancel, startedAt: time.Now(), logEvent: logEvent, input: &inputRuntime}
 
 	var openedSockets []io.Closer
 	abort := func(err error) (*Forwarder, error) {
@@ -432,16 +455,16 @@ func startForwarder(config ForwarderConfig, logEvent func(level, message string)
 	listenConfig := net.ListenConfig{KeepAlive: tcpKeepAlive}
 	var workerFuncs []func()
 
-	switch input := config.Input; input.Mode {
+	switch input := forwarderConfig.Input; input.Mode {
 	case "tcp-listen":
-		listener, err := listenConfig.Listen(ctx, "tcp", input.address())
+		listener, err := listenConfig.Listen(ctx, "tcp", input.Address())
 		if err != nil {
 			return abort(fmt.Errorf("input: %w", err))
 		}
 		openedSockets = append(openedSockets, listener)
 		workerFuncs = append(workerFuncs, func() { fw.runTCPListenInput(listener) })
 	case "udp-listen":
-		packetConn, err := listenConfig.ListenPacket(ctx, "udp", input.address())
+		packetConn, err := listenConfig.ListenPacket(ctx, "udp", input.Address())
 		if err != nil {
 			return abort(fmt.Errorf("input: %w", err))
 		}
@@ -455,11 +478,11 @@ func startForwarder(config ForwarderConfig, logEvent func(level, message string)
 		workerFuncs = append(workerFuncs, fw.runUDPConnectInput)
 	}
 
-	for i, outputConfig := range config.Outputs {
+	for i, outputConfig := range forwarderConfig.Outputs {
 		out := &outputRuntime{endpointRuntime: newEndpointRuntime(outputConfig)}
 		switch outputConfig.Mode {
 		case "tcp-listen":
-			listener, err := listenConfig.Listen(ctx, "tcp", outputConfig.address())
+			listener, err := listenConfig.Listen(ctx, "tcp", outputConfig.Address())
 			if err != nil {
 				return abort(fmt.Errorf("output %d: %w", i+1, err))
 			}
@@ -470,12 +493,12 @@ func startForwarder(config ForwarderConfig, logEvent func(level, message string)
 			// Every remote host gets its own queue, so one host that is down
 			// or slow never holds back the others.
 			for _, connection := range out.connections {
-				queue := make(chan []byte, outputConfig.queueSizeOr(defaultOutputQueue))
+				queue := make(chan []byte, outputConfig.QueueSizeOr(defaultOutputQueue))
 				out.connectQueues = append(out.connectQueues, queue)
 				workerFuncs = append(workerFuncs, func() { fw.runTCPConnectOutput(out, connection, queue) })
 			}
 		case "udp-send":
-			out.queue = make(chan []byte, outputConfig.queueSizeOr(defaultOutputQueue))
+			out.queue = make(chan []byte, outputConfig.QueueSizeOr(defaultOutputQueue))
 			workerFuncs = append(workerFuncs, func() { fw.runUDPSendOutput(out) })
 		}
 		fw.outputs = append(fw.outputs, out)
@@ -534,9 +557,9 @@ func (fw *Forwarder) runRecovering(fn func()) {
 	fn()
 }
 
-// dispatch is the hot path: every message received by the input passes
+// Dispatch is the hot path: every message received by the input passes
 // through here and is handed to all outputs (and to the taps, if watched).
-func (fw *Forwarder) dispatch(message []byte, source string) {
+func (fw *Forwarder) Dispatch(message []byte, source string) {
 	now := time.Now().UnixNano()
 	fw.lastDataAt.Store(now)
 	fw.input.byteCount.Add(uint64(len(message)))
@@ -667,13 +690,13 @@ func (fw *Forwarder) readFromConnection(conn net.Conn, peer *Peer) error {
 	defer context.AfterFunc(fw.ctx, func() { conn.Close() })() // Stop unblocks Read
 	disableNagle(conn)
 	lineFramer := framer{splitLines: fw.config.Framing == "lines"}
-	defer lineFramer.flush(peer.Remote, fw.dispatch)
+	defer lineFramer.flush(peer.Remote, fw.Dispatch)
 	readBuffer := make([]byte, tcpReadBufferSize)
 	for {
 		n, err := conn.Read(readBuffer)
 		if n > 0 {
 			peer.countBytes(n)
-			lineFramer.feedStream(readBuffer[:n], peer.Remote, fw.dispatch)
+			lineFramer.feedStream(readBuffer[:n], peer.Remote, fw.Dispatch)
 		}
 		if err != nil {
 			return err
@@ -759,7 +782,7 @@ func (fw *Forwarder) runUDPListenInput(udpConn *net.UDPConn) {
 			senders[senderAddr] = peer
 		}
 		peer.countBytes(n)
-		lineFramer.feedDatagram(readBuffer[:n], peer.Remote, fw.dispatch)
+		lineFramer.feedDatagram(readBuffer[:n], peer.Remote, fw.Dispatch)
 
 		if now := time.Now(); now.Sub(lastExpiryCheck) > 10*time.Second {
 			lastExpiryCheck = now
@@ -781,7 +804,7 @@ func (fw *Forwarder) runUDPConnectInput() {
 	var retry retryDelay
 	for fw.ctx.Err() == nil {
 		input.setState("connecting")
-		conn, err := dialer.DialContext(fw.ctx, "udp", input.config.address())
+		conn, err := dialer.DialContext(fw.ctx, "udp", input.config.Address())
 		if err != nil {
 			if fw.ctx.Err() != nil {
 				return
@@ -839,7 +862,7 @@ func (fw *Forwarder) receiveUDPSession(udpConn *net.UDPConn) error {
 			// the remote service may come back.
 			if errors.Is(err, syscall.ECONNREFUSED) {
 				if state != "unreachable" {
-					fw.logEvent("warn", "input: "+input.config.address()+" port unreachable")
+					fw.logEvent("warn", "input: "+input.config.Address()+" port unreachable")
 					state = "unreachable"
 				}
 				input.setStateWithError(state, err)
@@ -855,7 +878,7 @@ func (fw *Forwarder) receiveUDPSession(udpConn *net.UDPConn) error {
 			input.setState(state)
 		}
 		peer.countBytes(n)
-		lineFramer.feedDatagram(readBuffer[:n], peer.Remote, fw.dispatch)
+		lineFramer.feedDatagram(readBuffer[:n], peer.Remote, fw.Dispatch)
 	}
 }
 
@@ -936,7 +959,7 @@ func (fw *Forwarder) runTCPListenOutput(out *outputRuntime, listener net.Listene
 
 		// A new client only receives data from now on, through its own queue.
 		client := &outputClient{
-			queue: make(chan []byte, out.config.queueSizeOr(defaultClientQueue)),
+			queue: make(chan []byte, out.config.QueueSizeOr(defaultClientQueue)),
 			peer:  out.addPeer(conn.RemoteAddr().String(), conn),
 		}
 		out.clientsMu.Lock()
@@ -1009,7 +1032,7 @@ func (fw *Forwarder) runUDPSendOutput(out *outputRuntime) {
 	var retry retryDelay
 	for fw.ctx.Err() == nil {
 		out.setState("connecting")
-		conn, err := dialer.DialContext(fw.ctx, "udp", out.config.address())
+		conn, err := dialer.DialContext(fw.ctx, "udp", out.config.Address())
 		if err != nil {
 			if fw.ctx.Err() != nil {
 				return
@@ -1058,7 +1081,7 @@ func (fw *Forwarder) sendQueueOverUDP(udpConn *net.UDPConn, out *outputRuntime) 
 			case errors.Is(err, syscall.ECONNREFUSED):
 				// The remote reported "port unreachable". Keep sending: it may come back.
 				if reachable {
-					fw.logEvent("warn", outputLabel(out)+": "+out.config.address()+" port unreachable")
+					fw.logEvent("warn", outputLabel(out)+": "+out.config.Address()+" port unreachable")
 				}
 				out.setStateWithError("unreachable", err)
 				out.dropCount.Add(1)
@@ -1074,7 +1097,7 @@ func (fw *Forwarder) sendQueueOverUDP(udpConn *net.UDPConn, out *outputRuntime) 
 
 // ---- status & control ----
 
-func (fw *Forwarder) snapshot(includePeers bool) (EndpointStatus, []EndpointStatus) {
+func (fw *Forwarder) Snapshot(includePeers bool) (EndpointStatus, []EndpointStatus) {
 	outputs := make([]EndpointStatus, len(fw.outputs))
 	for i, out := range fw.outputs {
 		outputs[i] = out.snapshot(includePeers)
@@ -1087,13 +1110,13 @@ func (fw *Forwarder) snapshot(includePeers bool) (EndpointStatus, []EndpointStat
 	return fw.input.snapshot(includePeers), outputs
 }
 
-// trafficCounters are the totals since the forwarder was started.
-type trafficCounters struct {
+// TrafficCounters are the totals since the forwarder was started.
+type TrafficCounters struct {
 	BytesIn, BytesOut, Messages, Drops uint64
 }
 
-func (fw *Forwarder) counters() trafficCounters {
-	totals := trafficCounters{
+func (fw *Forwarder) Counters() TrafficCounters {
+	totals := TrafficCounters{
 		BytesIn:  fw.input.byteCount.Load(),
 		Messages: fw.input.messageCount.Load(),
 		Drops:    fw.input.dropCount.Load(),
@@ -1107,7 +1130,7 @@ func (fw *Forwarder) counters() trafficCounters {
 
 // disconnectPeer closes one connection. endpoint is "in" for the input or
 // "out:<index>" for an output.
-func (fw *Forwarder) disconnectPeer(endpoint string, peerID uint64) bool {
+func (fw *Forwarder) DisconnectPeer(endpoint string, peerID uint64) bool {
 	if endpoint == "in" {
 		return fw.input.disconnectPeer(peerID)
 	}
@@ -1125,7 +1148,7 @@ func outputLabel(out *outputRuntime) string {
 	if out.config.Name != "" {
 		return "output " + out.config.Name
 	}
-	return "output " + out.config.Mode + " " + out.config.address() // the first host, also with several
+	return "output " + out.config.Mode + " " + out.config.Address() // the first host, also with several
 }
 
 // disableNagle makes TCP send small messages immediately instead of waiting

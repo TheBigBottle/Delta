@@ -1,4 +1,4 @@
-package main
+package manager
 
 // The event log: everything Delta reports (starts, stops, connects, errors,
 // alerts). The newest events are kept in memory for the web interface, and
@@ -26,6 +26,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"delta/internal/config"
 )
 
 type Event struct {
@@ -37,13 +39,13 @@ type Event struct {
 	Message       string    `json:"msg"`
 }
 
-const eventLogCapacity = 5000 // events kept in memory (and loaded from the file at startup)
+const EventLogCapacity = 5000 // events kept in memory (and loaded from the file at startup)
 
 // EventLog keeps the newest events in memory (a ring buffer), appends every
 // event to the log file, writes it to the process log and pushes it to the browsers.
 type EventLog struct {
 	mu     sync.Mutex
-	events []Event // ring buffer: the event with ID n is stored at index (n-1) % eventLogCapacity
+	events []Event // ring buffer: the event with ID n is stored at index (n-1) % EventLogCapacity
 	lastID uint64
 	bus    *EventBus
 
@@ -79,10 +81,10 @@ func (log *EventLog) Add(level, forwarderID, forwarderName, message string) {
 
 // rememberLocked stores the event in the ring buffer. log.mu must be held.
 func (log *EventLog) rememberLocked(event Event) {
-	if len(log.events) < eventLogCapacity {
+	if len(log.events) < EventLogCapacity {
 		log.events = append(log.events, event)
 	} else {
-		log.events[(event.ID-1)%eventLogCapacity] = event
+		log.events[(event.ID-1)%EventLogCapacity] = event
 	}
 }
 
@@ -93,7 +95,7 @@ func (log *EventLog) NewestFirst(forwarderID string, limit int) []Event {
 	defer log.mu.Unlock()
 	result := []Event{}
 	for id := log.lastID; id > 0 && log.lastID-id < uint64(len(log.events)) && len(result) < limit; id-- {
-		if event := log.events[(id-1)%eventLogCapacity]; forwarderID == "" || event.ForwarderID == forwarderID {
+		if event := log.events[(id-1)%EventLogCapacity]; forwarderID == "" || event.ForwarderID == forwarderID {
 			result = append(result, event)
 		}
 	}
@@ -152,7 +154,7 @@ func (log *EventLog) closeFileLocked() {
 }
 
 // loadFromFilesLocked reads the rotated part and then the current file, keeps
-// the newest eventLogCapacity events in memory and continues their numbering.
+// the newest EventLogCapacity events in memory and continues their numbering.
 // Lines that cannot be parsed (e.g. cut off by a crash) are skipped.
 func (log *EventLog) loadFromFilesLocked(path string) {
 	var loaded []Event
@@ -173,8 +175,8 @@ func (log *EventLog) loadFromFilesLocked(path string) {
 		}
 		file.Close()
 	}
-	if len(loaded) > eventLogCapacity {
-		loaded = loaded[len(loaded)-eventLogCapacity:]
+	if len(loaded) > EventLogCapacity {
+		loaded = loaded[len(loaded)-EventLogCapacity:]
 	}
 	// Renumber them 1…n: the IDs only have to be unique and increasing in this process.
 	for _, event := range loaded {
@@ -299,11 +301,11 @@ func parseLogLine(line string) (event Event, ok bool) {
 // directory of the config file.
 func resolveEventLogPath(configPath, configured string) string {
 	configured = strings.TrimSpace(configured)
-	if strings.EqualFold(configured, eventLogOff) {
+	if strings.EqualFold(configured, config.EventLogOff) {
 		return ""
 	}
 	if configured == "" {
-		configured = defaultEventLog
+		configured = config.DefaultEventLog
 	}
-	return resolveNextToConfig(configPath, configured)
+	return config.ResolvePath(configPath, configured)
 }

@@ -1,4 +1,6 @@
-package main
+// Package api is the HTTP side of Delta: the REST API, the login, the live
+// streams and the embedded web interface.
+package api
 
 // The HTTP side of Delta: the JSON API used by the web interface (and by
 // scripts), the password login, live updates via server-sent events, and the
@@ -10,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -18,12 +19,16 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"delta/internal/config"
+	"delta/internal/manager"
+	"delta/web"
 )
 
 const sessionCookieName = "delta_session"
 
 type Server struct {
-	manager     *Manager
+	manager     *manager.Manager
 	sessionsMu  sync.Mutex
 	sessions    map[string]time.Time // session token -> expiry
 	loginMu     sync.Mutex           // serializes login attempts (brute-force protection)
@@ -36,17 +41,16 @@ type Server struct {
 	basicAuthValid map[[32]byte]bool
 }
 
-func newServer(manager *Manager) *Server {
-	webFiles, _ := fs.Sub(embeddedWebFiles, "web")
+func NewServer(deltaManager *manager.Manager) *Server {
 	return &Server{
-		manager: manager, sessions: map[string]time.Time{}, staticFiles: http.FileServerFS(webFiles),
+		manager: deltaManager, sessions: map[string]time.Time{}, staticFiles: http.FileServerFS(web.Files),
 		basicAuthValid: map[[32]byte]bool{},
 	}
 }
 
 // routes registers all URLs. Everything below /api except login/logout
 // requires a valid session or the password via HTTP basic auth.
-func (s *Server) routes() http.Handler {
+func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/login", s.handleLogin)
 	mux.HandleFunc("POST /api/logout", s.handleLogout)
@@ -55,7 +59,7 @@ func (s *Server) routes() http.Handler {
 	protected := func(pattern string, handler http.HandlerFunc) { mux.Handle(pattern, s.requireLogin(handler)) }
 
 	protected("GET /api/session", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "version": version})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "version": s.manager.Version})
 	})
 	protected("GET /api/forwarders", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, s.manager.List())
@@ -115,7 +119,7 @@ func (s *Server) checkBasicAuthPassword(password string) bool {
 	if known {
 		return true
 	}
-	if !verifyPassword(password, storedHash) {
+	if !config.VerifyPassword(password, storedHash) {
 		return false
 	}
 	s.basicAuthMu.Lock()
@@ -169,9 +173,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, errors.New("no password set yet"))
 		return
 	}
-	if !verifyPassword(request.Password, s.manager.PasswordHash()) {
+	if !config.VerifyPassword(request.Password, s.manager.PasswordHash()) {
 		time.Sleep(time.Second)
-		s.manager.events.Add("warn", "", "", "failed login from "+r.RemoteAddr)
+		s.manager.Events.Add("warn", "", "", "failed login from "+r.RemoteAddr)
 		writeError(w, http.StatusUnauthorized, errors.New("wrong password"))
 		return
 	}
@@ -191,7 +195,7 @@ func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
 // handleSetup saves the first password and settings and logs the browser in.
 // It only works while no password exists (enforced by CompleteSetup).
 func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
-	var request InitialSetup
+	var request config.InitialSetup
 	if err := readJSON(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -210,7 +214,7 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 
 // startSession creates a new session and sends its cookie to the browser.
 func (s *Server) startSession(w http.ResponseWriter, r *http.Request) {
-	token := randomHex(32)
+	token := config.RandomHex(32)
 	expiresAt := time.Now().Add(time.Duration(s.manager.SessionHours()) * time.Hour)
 	s.sessionsMu.Lock()
 	for oldToken, oldExpiry := range s.sessions { // clean up expired sessions
@@ -242,7 +246,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 // ---- forwarders ----
 
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
-	var fc ForwarderConfig
+	var fc config.ForwarderConfig
 	if err := readJSON(r, &fc); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -259,21 +263,21 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 	status, found := s.manager.Get(r.PathValue("id"))
 	if !found {
-		writeError(w, http.StatusNotFound, errNotFound)
+		writeError(w, http.StatusNotFound, manager.ErrNotFound)
 		return
 	}
 	writeJSON(w, http.StatusOK, status)
 }
 
 func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
-	var fc ForwarderConfig
+	var fc config.ForwarderConfig
 	if err := readJSON(r, &fc); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	status, err := s.manager.Update(r.PathValue("id"), fc)
 	switch {
-	case errors.Is(err, errNotFound):
+	case errors.Is(err, manager.ErrNotFound):
 		writeError(w, http.StatusNotFound, err)
 	case err != nil && status.ID == "":
 		writeError(w, http.StatusBadRequest, err)
@@ -323,7 +327,7 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		code := http.StatusBadRequest
-		if errors.Is(err, errNotFound) {
+		if errors.Is(err, manager.ErrNotFound) {
 			code = http.StatusNotFound
 		}
 		writeError(w, code, err)
@@ -334,24 +338,10 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, status)
 }
 
-func (m *Manager) StopReplay(id string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	inst := m.instances[id]
-	if inst == nil {
-		return errNotFound
-	}
-	if inst.replay == nil {
-		return errors.New("no replay running")
-	}
-	inst.replay.stop()
-	return nil
-}
-
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	history, found := s.manager.History(r.PathValue("id"))
 	if !found {
-		writeError(w, http.StatusNotFound, errNotFound)
+		writeError(w, http.StatusNotFound, manager.ErrNotFound)
 		return
 	}
 	writeJSON(w, http.StatusOK, history)
@@ -393,7 +383,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 	var request struct {
-		Forwarders []ForwarderConfig `json:"forwarders"`
+		Forwarders []config.ForwarderConfig `json:"forwarders"`
 	}
 	if err := readJSON(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -426,8 +416,8 @@ func startEventStream(w http.ResponseWriter) (http.Flusher, bool) {
 // handleLiveStream keeps a connection open and pushes the forwarder list
 // (every second and after every change) and new events to the browser.
 func (s *Server) handleLiveStream(w http.ResponseWriter, r *http.Request) {
-	updates := s.manager.liveUpdates.Subscribe()
-	defer s.manager.liveUpdates.Unsubscribe(updates)
+	updates := s.manager.LiveUpdates.Subscribe()
+	defer s.manager.LiveUpdates.Unsubscribe(updates)
 	flusher, ok := startEventStream(w)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, errors.New("streaming unsupported"))
@@ -456,14 +446,6 @@ func (s *Server) handleLiveStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// inspectedMessage is one row of the live inspector or the capture viewer.
-type inspectedMessage struct {
-	TimeMillis float64 `json:"t"` // live: unix ms; capture: ms since the capture started
-	Source     string  `json:"s"`
-	Length     int     `json:"n"` // full length; Data may be shortened
-	Data       []byte  `json:"d"` // the first previewBytes bytes, base64 in JSON
-}
-
 const (
 	defaultPreviewBytes = 1024
 	maxPreviewBytes     = 16384
@@ -480,13 +462,6 @@ func previewBytesParam(r *http.Request) int {
 		return defaultPreviewBytes
 	}
 	return min(previewBytes, maxPreviewBytes)
-}
-
-func previewOf(data []byte, previewBytes int) []byte {
-	if len(data) > previewBytes {
-		return data[:previewBytes]
-	}
-	return data
 }
 
 // handleInspect streams the data passing through a running forwarder to the
@@ -507,8 +482,8 @@ func (s *Server) handleInspect(w http.ResponseWriter, r *http.Request) {
 		maxPerSecond = 100
 	}
 	previewBytes := previewBytesParam(r)
-	tapped := fw.taps.subscribe(4096)
-	defer fw.taps.unsubscribe(tapped)
+	tapped := fw.Subscribe(4096)
+	defer fw.Unsubscribe(tapped)
 	flusher, ok := startEventStream(w)
 	if !ok {
 		return
@@ -520,26 +495,26 @@ func (s *Server) handleInspect(w http.ResponseWriter, r *http.Request) {
 	// Two token buckets, refilled every batch interval: one counts messages, one bytes.
 	tokens, refillPerBatch := float64(maxPerSecond), float64(maxPerSecond)/batchesPerSecond
 	byteTokens, byteRefillPerBatch := maxInspectBytesPerSecond, maxInspectBytesPerSecond/batchesPerSecond
-	var batch []inspectedMessage
+	var batch []manager.InspectedMessage
 	skipped, skippedAtLastSend := 0, 0
 	quietBatches := 0
 	for {
 		select {
 		case <-r.Context().Done():
 			return
-		case <-fw.ctx.Done(): // the forwarder was stopped
+		case <-fw.Done(): // the forwarder was stopped
 			io.WriteString(w, "event: end\ndata: {}\n\n")
 			flusher.Flush()
 			return
 		case message := <-tapped:
-			data := previewOf(message.Data, previewBytes)
+			data := manager.PreviewOf(message.Data, previewBytes)
 			if tokens < 1 || byteTokens < len(data) {
 				skipped++
 				continue
 			}
 			tokens--
 			byteTokens -= len(data)
-			batch = append(batch, inspectedMessage{
+			batch = append(batch, manager.InspectedMessage{
 				TimeMillis: float64(message.Time) / float64(time.Millisecond),
 				Source:     message.Source, Length: len(message.Data), Data: data,
 			})
@@ -565,16 +540,16 @@ func (s *Server) handleInspect(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	if limit <= 0 || limit > eventLogCapacity {
+	if limit <= 0 || limit > manager.EventLogCapacity {
 		limit = 500
 	}
-	writeJSON(w, http.StatusOK, s.manager.events.NewestFirst(r.URL.Query().Get("forwarder"), limit))
+	writeJSON(w, http.StatusOK, s.manager.Events.NewestFirst(r.URL.Query().Get("forwarder"), limit))
 }
 
 // ---- settings ----
 
 func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
-	var update SettingsUpdate
+	var update manager.SettingsUpdate
 	if err := readJSON(r, &update); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -596,7 +571,7 @@ func (s *Server) handleTestWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	text := "[Delta] Test notification — webhook works."
 	payload := map[string]any{"text": text, "content": text, "status": "TEST", "time": time.Now().UTC()}
-	if err := s.manager.postWebhook(request.URL, payload); err != nil {
+	if err := s.manager.PostWebhook(request.URL, payload); err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return
 	}
@@ -628,7 +603,7 @@ func (s *Server) handleUploadCapture(w http.ResponseWriter, r *http.Request) {
 // recorded data without timestamps (for NMEA this is a plain log file).
 func (s *Server) handleDownloadCapture(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	path, err := s.manager.capturePath(name)
+	path, err := s.manager.CapturePath(name)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -647,7 +622,7 @@ func (s *Server) handleDownloadCapture(w http.ResponseWriter, r *http.Request) {
 	}
 	baseName := name[:len(name)-len(".dcap")]
 	w.Header().Set("Content-Disposition", `attachment; filename="`+baseName+`.bin"`)
-	readDcap(file, func(_ int64, _ string, data []byte) error {
+	manager.ReadDcap(file, func(_ int64, _ string, data []byte) error {
 		_, err := w.Write(data)
 		return err
 	})
@@ -663,7 +638,7 @@ func (s *Server) handleCaptureRecords(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 || limit > 1000 {
 		limit = 200
 	}
-	matches, err := parseRecordFilter(query.Get("filter"))
+	matches, err := manager.ParseRecordFilter(query.Get("filter"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -685,7 +660,7 @@ func (s *Server) handleDeleteCapture(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleReplay(w http.ResponseWriter, r *http.Request) {
-	var options ReplayOptions
+	var options manager.ReplayOptions
 	if err := readJSON(r, &options); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return

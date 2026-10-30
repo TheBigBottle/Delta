@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"strings"
@@ -10,14 +10,14 @@ func TestForwarderComment(t *testing.T) {
 	forwarder := ForwarderConfig{Name: "x", Comment: "  mast cable\nask Jan  ",
 		Input:   EndpointConfig{Mode: "udp-listen", Port: 29100},
 		Outputs: []EndpointConfig{{Mode: "udp-send", Host: "127.0.0.1", Port: 29101}}}
-	if err := forwarder.normalize(); err != nil {
+	if err := forwarder.Normalize(); err != nil {
 		t.Fatal(err)
 	}
 	if forwarder.Comment != "mast cable\nask Jan" {
 		t.Fatalf("comment = %q", forwarder.Comment)
 	}
 	forwarder.Comment = strings.Repeat("x", maxCommentLength+1)
-	if err := forwarder.normalize(); err == nil {
+	if err := forwarder.Normalize(); err == nil {
 		t.Fatal("an over-long comment was accepted")
 	}
 }

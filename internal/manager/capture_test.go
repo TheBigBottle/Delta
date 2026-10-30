@@ -1,4 +1,4 @@
-package main
+package manager
 
 import (
 	"fmt"
@@ -41,7 +41,7 @@ func TestCapturePaging(t *testing.T) {
 	}
 
 	for _, filter := range []string{"SPECIAL", "/^\\$GPGGA/", "/special/i"} {
-		matches, err := parseRecordFilter(filter)
+		matches, err := ParseRecordFilter(filter)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -53,7 +53,7 @@ func TestCapturePaging(t *testing.T) {
 			t.Fatalf("filter %q: got %d records, next %d", filter, len(page.Records), page.Next)
 		}
 	}
-	if _, err := parseRecordFilter("/[unclosed/"); err == nil {
+	if _, err := ParseRecordFilter("/[unclosed/"); err == nil {
 		t.Fatal("invalid regex must be rejected")
 	}
 	if _, err := m.ReadCapturePage("../../etc/passwd", 0, 10, 10, nil); err == nil {

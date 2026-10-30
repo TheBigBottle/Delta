@@ -5,16 +5,16 @@
 #   3. run the tests with the race detector
 #   4. build a static, stripped binary (no C dependencies, runs on any Linux)
 #
-# Usage:
-#   ./build.sh                 build ./delta for this machine
-#   ./build.sh --skip-tests    build without running the tests
-#   ./build.sh --all           also cross-compile for common Linux platforms into dist/
+# Usage (from anywhere; the binaries land in the project folder):
+#   scripts/build.sh                 build ./delta for this machine
+#   scripts/build.sh --skip-tests    build without running the tests
+#   scripts/build.sh --all           also cross-compile for common Linux platforms into dist/
 #
 # Environment variables:
-#   VERSION=1.2.0 ./build.sh   embed a version number (shown by "delta -version")
+#   VERSION=1.2.0 scripts/build.sh   embed a version number (shown by "delta -version")
 set -euo pipefail
 
-cd "$(dirname "$0")" # always build from the project folder
+cd "$(dirname "$0")/.." # always build from the project folder (this script is in scripts/)
 
 run_tests=true
 build_all=false
@@ -58,7 +58,7 @@ fi
 build() { # build <GOOS> <GOARCH> [GOARM] <output file>
   local goos=$1 goarch=$2 goarm=$3 output=$4
   CGO_ENABLED=0 GOOS=$goos GOARCH=$goarch GOARM=$goarm \
-    go build -trimpath -ldflags="$ldflags" -o "$output" .
+    go build -trimpath -ldflags="$ldflags" -o "$output" ./cmd/delta
   echo "    $output ($(du -h "$output" | cut -f1))"
 }
 

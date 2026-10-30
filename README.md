@@ -11,9 +11,9 @@ It is a single static binary with no dependencies, and the web UI is built in.
 ## Build & run
 
 ```bash
-./build.sh                          # format check, vet, tests, static binary ./delta
-./build.sh --all                    # also amd64/arm64/armv7/386 binaries in dist/
-VERSION=1.1.0 ./build.sh            # embed a version number (--skip-tests to skip the tests)
+scripts/build.sh                    # format check, vet, tests, static binary ./delta
+scripts/build.sh --all              # also amd64/arm64/armv7/386 binaries in dist/
+VERSION=1.1.0 scripts/build.sh      # embed a version number (--skip-tests to skip the tests)
 ./delta                             # uses ./delta.json, creates it on first start
 ./delta -config /etc/delta/delta.json -port 8080
 ```
@@ -36,7 +36,7 @@ Delta replaces it with the hash on startup. Configs from older versions that con
 ## Run as a systemd service
 
 Download the binary for your platform from the [releases page](https://github.com/TheBigBottle/Delta/releases)
-(`delta-linux-amd64`, `-arm64`, `-armv7` or `-386`; check it against `SHA256SUMS`) or build it with `./build.sh`.
+(`delta-linux-amd64`, `-arm64`, `-armv7` or `-386`; check it against `SHA256SUMS`) or build it with `scripts/build.sh`.
 
 **1. Install the binary and create a service user**
 
@@ -175,7 +175,7 @@ Forwarders without an `id` get one automatically.
 - Port conflicts are reported immediately. A forwarder that fails to start, for example at boot, is retried every 15 s.
 - A panic in one worker only affects that connection or worker, never the process.
 
-Measured on loopback (`go test -run Latency -v`), TCP source → Delta → TCP client, NMEA sentences: **p50 ≈ 31 µs, p99 ≈ 55 µs**. Both TCP hops are included.
+Measured on loopback (`go test -run Latency -v ./internal/engine`), TCP source → Delta → TCP client, NMEA sentences: **p50 ≈ 31 µs, p99 ≈ 55 µs**. Both TCP hops are included.
 
 ## Web interface
 
@@ -243,28 +243,30 @@ For ufw: `sudo ufw allow 10110/tcp`.
 ## Development
 
 ```bash
-go test -race ./...        # engine integration tests (fan-out, framing, reconnect, slow clients, leaks, latency)
+go test -race ./...        # all tests; the engine tests run over real sockets (fan-out, framing, reconnect, slow clients, leaks, latency)
+go run ./cmd/delta -config /tmp/delta-test/delta.json -port 18470   # run from source
+```
+
+Project layout (standard Go layout, standard library only):
+
+```
+cmd/delta/          main package: command line, startup, shutdown
+internal/config/    config file format, validation, atomic saving, password hashing
+internal/engine/    the data path: endpoints, framing, per-output queues, reconnects
+internal/manager/   forwarder lifecycle, rates, alerts, event log, captures and replay
+internal/api/       HTTP API, login, live streams (server-sent events)
+web/                the web interface (HTML, CSS, JavaScript), embedded into the binary
+scripts/build.sh    format check, vet, tests, static (cross-)builds
 ```
 
 **Releases** are made locally with the [GitHub CLI](https://cli.github.com/) (`gh auth login` once):
 
 ```bash
-VERSION=1.3.0 ./build.sh --all                       # tests + all binaries in dist/
+VERSION=1.3.0 scripts/build.sh --all                 # tests + all binaries in dist/
 (cd dist && sha256sum delta-* > SHA256SUMS)
 git tag -a v1.3.0 -m "Delta 1.3.0" && git push origin v1.3.0
 gh release create v1.3.0 dist/delta-* dist/SHA256SUMS --title "Delta v1.3.0" --generate-notes
 ```
-
-Files:
-
-| File | Contents |
-|---|---|
-| `engine.go` | Data path: endpoints, framing, queues, reconnects |
-| `manager.go` | Lifecycle, persistence, metrics, alerts |
-| `eventlog.go` | Event log in memory and in the log file (rotation, reload at startup) |
-| `capture.go` | Recording and replay |
-| `api.go` | HTTP API and authentication |
-| `web/` | Frontend, embedded into the binary |
 
 The web interface uses plain HTTP. If you expose it beyond a trusted network, put it behind a TLS reverse proxy.
 

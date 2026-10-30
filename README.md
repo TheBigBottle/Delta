@@ -31,6 +31,73 @@ Set the password right after starting Delta: whoever opens the page first can ch
 **Forgot the password?** Stop Delta, add `"password": "new-password"` (at least 8 characters) to the config file, and start Delta again.
 Delta replaces it with the hash on startup. Configs from older versions that contain a plain `password` are converted the same way.
 
+## Run as a systemd service
+
+Download the binary for your platform from the [releases page](https://github.com/TheBigBottle/Delta/releases)
+(`delta-linux-amd64`, `-arm64`, `-armv7` or `-386`; check it against `SHA256SUMS`) or build it with `./build.sh`.
+
+**1. Install the binary and create a service user**
+
+```bash
+sudo install -m 0755 delta-linux-amd64 /usr/local/bin/delta
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin delta
+```
+
+**2. Create the unit file** `/etc/systemd/system/delta.service`:
+
+```ini
+[Unit]
+Description=Delta – the NMEA Proxy
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=delta
+Group=delta
+# Creates /var/lib/delta (owned by the delta user) for the config file and captures.
+StateDirectory=delta
+StateDirectoryMode=0750
+ExecStart=/usr/local/bin/delta -config /var/lib/delta/delta.json
+Restart=on-failure
+RestartSec=2
+# Delta shuts down cleanly on SIGTERM; give running forwarders time to stop.
+TimeoutStopSec=15
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+# Uncomment if a forwarder or the web UI must listen on a port below 1024:
+#AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+```
+
+The config directory must be writable by the service, because Delta saves the config atomically (temporary file + rename) in the same folder.
+`data_dir` (captures) is resolved relative to the config file, so it ends up in `/var/lib/delta/delta-data`.
+
+**3. Start it and set the password**
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now delta
+systemctl status delta
+journalctl -u delta -f            # live log
+```
+
+Open `http://<server>:8470` right away and choose the password (see above). Open the web port and the forwarder ports in the firewall if needed (see *Troubleshooting*).
+
+Forwarders that were running are started again after a reboot (`autostart`). To reset a forgotten password, stop the service,
+add `"password"` to `/var/lib/delta/delta.json` and start it again.
+To update, replace `/usr/local/bin/delta` and run `sudo systemctl restart delta`.
+
 ## Config file
 
 One JSON file holds the settings and all forwarders. Delta rewrites it atomically whenever you change something in the UI.
@@ -162,6 +229,9 @@ For ufw: `sudo ufw allow 10110/tcp`.
 ```bash
 go test -race ./...        # engine integration tests (fan-out, framing, reconnect, slow clients, leaks, latency)
 ```
+
+**Releases:** pushing a version tag (`git tag v1.3.0 && git push origin v1.3.0`) runs `.github/workflows/release.yml`,
+which builds all binaries with `./build.sh --all` and publishes them with checksums as a GitHub release.
 
 Files:
 

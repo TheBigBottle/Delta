@@ -80,33 +80,71 @@ function svgBox(x, y, width, height, title, subtitle, cssClass = 'box') {
 
 /* ================= diagrams ================= */
 
-// The big picture: several senders into one input, copied once, one queue per output, many receivers.
+// The big picture, with every way Delta can be connected:
+//   input:  either Delta is the server (senders connect to it) or the client (it connects to the senders);
+//   output: clients connect to Delta, Delta connects to targets, or Delta sends UDP datagrams.
+// Solid colored lines carry the data, dashed grey arrows point from whoever opens the connection.
+// Every receiver has its own queue (the small slots inside the output boxes).
 function helpOverviewDiagram() {
-  const queueRows = [[45, 'Output 1', 'Chart plotter', 2], [100, 'Output 2', 'Navigation PC', 0], [155, 'Output 3', 'Logger', 5]];
-  const queues = queueRows.map(([y, label, receiver, filledSlots]) => {
-    let slots = '';
-    for (let slot = 0; slot < 8; slot++) {
-      slots += `<rect x="${447 + slot * 11}" y="${y + 15}" width="8" height="10" rx="2" class="${slot >= 8 - filledSlots ? 'slot-full' : 'slot'}"/>`;
-    }
-    return `<rect x="385" y="${y}" width="150" height="40" rx="9" class="box"/>`
-      + svgText(395, y + 24, label, 'strong', 'start') + slots
-      + `<path d="M344 120 C 365 120, 362 ${y + 20}, 383 ${y + 20}" class="flow-in anim" marker-end="url(#help-arrow-in)"/>`
-      + `<path d="M535 ${y + 20} H593" class="flow-out anim" marker-end="url(#help-arrow-out)"/>`
-      + svgBox(595, y, 150, 40, receiver, '', 'box-out');
+  const rowHeight = 40;
+  // Dashed "who connects" arrow just above a link, and the data line just below it.
+  const connectionArrow = (fromX, toX, centerY) =>
+    `<path d="M${fromX} ${centerY - 8} H${toX}" class="flow-muted dashed" marker-end="url(#help-arrow-muted)"/>`;
+  const dataLine = (fromX, toX, centerY, kind) =>
+    `<path d="M${fromX} ${centerY + 6} H${toX}" class="flow-${kind} anim" marker-end="url(#help-arrow-${kind})"/>`;
+
+  // Input side: two alternatives, each with two senders. [header, mode note, delta opens the connection, senders, top y]
+  const inputAlternatives = [
+    ['Either: Delta is the server', 'tcp-listen / udp-listen', false, [['GPS', 'connects to Delta'], ['AIS', 'connects to Delta']], 65],
+    ['or: Delta is the client', 'tcp-connect / udp-connect', true, [['Compass', 'Delta connects'], ['Wind sensor', 'Delta connects']], 255],
+  ];
+  const inputSide = inputAlternatives.map(([header, modeNote, deltaConnects, senders, top]) =>
+    svgText(10, top - 13, header, 'small strong accent', 'start')
+    + senders.map(([name, sub], index) => {
+      const y = top + index * 50, centerY = y + rowHeight / 2;
+      return svgBox(10, y, 110, rowHeight, name, sub)
+        + (deltaConnects ? connectionArrow(173, 124, centerY) : connectionArrow(122, 171, centerY))
+        + dataLine(120, 173, centerY, 'in');
+    }).join('')
+    + svgText(10, top + 110, modeNote, 'small muted', 'start')).join('');
+
+  // Output side: three outputs of different modes in the same forwarder. [title, mode, header, delta connects (null = no connection), receivers, filled queue slots per receiver, top y]
+  const outputs = [
+    ['Output 1', 'tcp-listen', 'Clients connect to Delta', false, ['Chart plotter', 'Tablet app', 'Laptop'], [2, 0, 4], 60],
+    ['Output 2', 'tcp-connect', 'Delta connects to targets', true, ['Navigation PC', 'Logger'], [1, 5], 225],
+    ['Output 3', 'udp-send', 'Delta sends datagrams', null, ['Display'], [0], 340],
+  ];
+  const inputCenterY = 220;
+  const outputSide = outputs.map(([title, mode, header, deltaConnects, receivers, filledSlots, top]) => {
+    const boxHeight = receivers.length * 50 - 10, boxCenterY = top + boxHeight / 2;
+    let html = `<path d="M306 ${inputCenterY} C 318 ${inputCenterY}, 316 ${boxCenterY}, 328 ${boxCenterY}" class="flow-in anim" marker-end="url(#help-arrow-in)"/>`
+      + `<rect x="330" y="${top}" width="175" height="${boxHeight}" rx="9" class="box"/>`
+      + svgText(340, boxCenterY - 3, title, 'strong', 'start') + svgText(340, boxCenterY + 12, mode, 'small muted', 'start')
+      + svgText(600, top - 8, header, 'small strong out', 'start');
+    receivers.forEach((receiver, index) => {
+      const y = top + index * 50, centerY = y + rowHeight / 2;
+      for (let slot = 0; slot < 8; slot++) {
+        html += `<rect x="${433 + slot * 9}" y="${centerY - 5}" width="7" height="10" rx="2" class="${slot >= 8 - filledSlots[index] ? 'slot-full' : 'slot'}"/>`;
+      }
+      if (deltaConnects === true) html += connectionArrow(509, 596, centerY);
+      if (deltaConnects === false) html += connectionArrow(596, 509, centerY);
+      html += dataLine(505, 597, centerY, 'out') + svgBox(600, y, 150, rowHeight, receiver, '', 'box-out');
+    });
+    return html;
   }).join('');
-  return `<svg class="help-svg" viewBox="0 0 760 240" role="img" aria-label="Data flow from two senders through Delta to three receivers">
-    ${svgBox(10, 55, 130, 44, 'GPS', 'sender 1')}
-    ${svgBox(10, 141, 130, 44, 'AIS', 'sender 2')}
-    <rect x="175" y="12" width="380" height="216" rx="16" class="frame"/>
-    ${svgText(190, 32, 'One Delta forwarder', 'strong accent', 'start')}
-    <path d="M140 77 C 168 77, 165 112, 193 112" class="flow-in anim" marker-end="url(#help-arrow-in)"/>
-    <path d="M140 163 C 168 163, 165 128, 193 128" class="flow-in anim" marker-end="url(#help-arrow-in)"/>
-    ${svgBox(195, 95, 100, 50, 'Input', 'e.g. UDP :10110', 'box-in')}
-    <path d="M295 120 H314" class="flow-in"/>
-    <circle cx="330" cy="120" r="15" class="box-in"/>${svgText(330, 124, '1×', 'strong')}
-    ${svgText(330, 152, 'copied once', 'small muted')}
-    ${svgText(460, 220, 'one queue per output', 'small muted')}
-    ${queues}
+
+  return `<svg class="help-svg" viewBox="0 0 760 445" role="img" aria-label="One forwarder: the input either accepts connections from senders or connects to them; three outputs where clients connect to Delta, Delta connects to targets, and Delta sends UDP datagrams">
+    <rect x="160" y="12" width="360" height="388" rx="16" class="frame"/>
+    ${svgText(175, 32, 'One Delta forwarder', 'strong accent', 'start')}
+    ${inputSide}
+    ${svgBox(175, 60, 90, 320, 'Input', 'one mode', 'box-in')}
+    <path d="M265 ${inputCenterY} H276" class="flow-in"/>
+    <circle cx="291" cy="${inputCenterY}" r="14" class="box-in"/>${svgText(291, inputCenterY + 4, '1×', 'strong')}
+    ${svgText(291, inputCenterY - 34, 'copied', 'small muted')}${svgText(291, inputCenterY - 22, 'once', 'small muted')}
+    ${outputSide}
+    <path d="M170 425 H200" class="flow-in"/><path d="M204 425 H234" class="flow-out"/>${svgText(242, 429, 'data', 'small muted', 'start')}
+    <path d="M300 425 H336" class="flow-muted dashed" marker-end="url(#help-arrow-muted)"/>${svgText(344, 429, 'opens the connection', 'small muted', 'start')}
+    <rect x="480" y="420" width="7" height="10" rx="2" class="slot-full"/><rect x="489" y="420" width="7" height="10" rx="2" class="slot"/>${svgText(503, 429, 'own queue per receiver', 'small muted', 'start')}
   </svg>`;
 }
 
@@ -462,7 +500,7 @@ const HELP_SECTIONS = [
       several devices connecting to a TCP port, several devices Delta connects to, or UDP datagrams from any number of hosts.
       Their messages are merged into one stream. It was built for NMEA 0183 (GPS, AIS, compass, wind …),
       but works with any TCP or UDP data, including binary streams.</p>
-    ${helpFigure(helpOverviewDiagram(), 'One <b>forwarder</b> = an input (with one or many senders) + its outputs. Every message is copied once and shared by all outputs; each output has its own queue, so a slow receiver never holds up the others.')}
+    ${helpFigure(helpOverviewDiagram(), 'One <b>forwarder</b> = an input + its outputs. The input uses <b>one</b> mode: either senders connect to Delta (Delta is the server), or Delta connects to one or more senders (Delta is the client); either way it can have many senders. Each output can use a different mode: clients connect to Delta, Delta connects to targets, or Delta sends UDP datagrams. Every message is copied once and shared by all outputs; every receiver has its own queue, so a slow one never holds up the others.')}
     <h3>The words used in Delta</h3>
     <table class="t compact help-table">
       <thead><tr><th>Term</th><th>Meaning</th></tr></thead>

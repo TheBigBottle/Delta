@@ -81,7 +81,7 @@ function svgBox(x, y, width, height, title, subtitle, cssClass = 'box') {
 /* ================= diagrams ================= */
 
 // The big picture, with every way Delta can be connected:
-//   input:  either Delta is the server (senders connect to it) or the client (it connects to the senders);
+//   input:  either Delta is the server (senders connect to it) or the client (it connects to the senders, tcp-connect);
 //   output: clients connect to Delta, Delta connects to targets, or Delta sends UDP datagrams.
 // Solid colored lines carry the data, dashed grey arrows point from whoever opens the connection.
 // Every receiver has its own queue (the small slots inside the output boxes).
@@ -98,7 +98,7 @@ function helpOverviewDiagram() {
   const inputCenterY = 220;
   const inputAlternatives = [
     ['Either: Delta is the server', ['tcp-listen', 'udp-listen'], false, [['GPS', 'connects to Delta'], ['AIS', 'connects to Delta']], 75],
-    ['or: Delta is the client', ['tcp-connect', 'udp-connect'], true, [['Compass', 'Delta connects'], ['Wind sensor', 'Delta connects']], 275],
+    ['or: Delta is the client', ['tcp-connect'], true, [['Compass', 'Delta connects'], ['Wind sensor', 'Delta connects']], 275],
   ];
   const inputSide = inputAlternatives.map(([header, modes, deltaConnects, senders, top]) => {
     const boxCenterY = top + 45;

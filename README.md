@@ -1,8 +1,10 @@
 # Delta – the NMEA Proxy
 
-Named after a river delta: one incoming stream splits into many channels.
+Named after a river delta: the data arriving on an input splits into many channels.
 
 Delta forwards TCP/UDP data streams, such as NMEA telegrams or raw bit streams, with very little added latency.
+An input can receive from many senders at once (several clients on a listen port, several devices Delta connects to,
+or UDP datagrams from any number of hosts); their messages are merged, and every output gets a copy.
 You manage it through a password-protected web interface.
 It is a single static binary with no dependencies, and the web UI is built in.
 
@@ -81,7 +83,9 @@ WantedBy=multi-user.target
 ```
 
 The config directory must be writable by the service, because Delta saves the config atomically (temporary file + rename) in the same folder.
-`data_dir` (captures) is resolved relative to the config file, so it ends up in `/var/lib/delta/delta-data`.
+`data_dir` (captures) and `event_log` are resolved relative to the config file, so they end up in `/var/lib/delta/delta-data`
+and `/var/lib/delta/delta-events.log`. To write the event log to `/var/log/delta/` instead, add `LogsDirectory=delta`
+to the `[Service]` section and set `"event_log": "/var/log/delta/events.log"`.
 
 **3. Start it and set the password**
 
@@ -111,6 +115,8 @@ Forwarders without an `id` get one automatically.
   "password_hash": "pbkdf2-sha256$600000$…",
   "data_dir": "delta-data",
   "session_hours": 24,
+  "event_log": "delta-events.log",
+  "event_log_max_mb": 10,
   "alerts": { "webhook_url": "", "down_after": 30 },
   "forwarders": [
     {
@@ -134,6 +140,11 @@ Forwarders without an `id` get one automatically.
 - `comment` holds free-text notes (up to 4000 characters), shown on the detail page and as a note icon in the list.
 - `autostart` records whether the forwarder was running. Forwarders that were running come back after a restart or reboot.
 - `data_dir` is where captures are stored. A relative path is resolved against the config file's directory.
+- `event_log` is the file every event (starts, stops, connects, errors, alerts) is appended to, one JSON object per line.
+  A relative path is resolved against the config file's directory; `off` keeps events in memory only.
+  At startup the newest 5000 events are loaded again, so the event list survives a restart.
+- `event_log_max_mb` (default 10): when the event log reaches this size it is renamed to `<file>.1` (replacing the older one)
+  and a new file is started, so at most about twice this size is used. Both settings can also be changed under Settings → Event log.
 - `framing`:
   - `lines` splits the stream at `\n`, so every NMEA sentence is forwarded whole, including to UDP targets.
   - `raw` forwards the bytes exactly as they arrive.
@@ -142,9 +153,9 @@ Forwarders without an `id` get one automatically.
 
 | Mode | As input | As output |
 |---|---|---|
-| `tcp-listen` | Sources connect to Delta (`max_clients`) | Clients connect and receive the data (`max_clients`, `queue` per client) |
+| `tcp-listen` | Any number of sources connect to Delta (up to `max_clients`); their data is merged | Clients connect and receive the data (`max_clients`, `queue` per client) |
 | `tcp-connect` | Delta connects to a source and reconnects automatically. More sources in `targets` are merged | Delta connects to a target, reconnects, and buffers up to `queue` messages while it is down. More targets in `targets` each get a copy and their own buffer |
-| `udp-listen` | Receive datagrams on a port | — |
+| `udp-listen` | Receive datagrams on a port, from any sender | — |
 | `udp-connect` | Delta registers at a remote host, optionally sending a `hello` datagram every `hello_interval` s | — |
 | `udp-send` | — | Send datagrams to a host |
 
@@ -178,7 +189,8 @@ Measured on loopback (`go test -run Latency -v`), TCP source → Delta → TCP c
   - *Down:* the forwarder failed to start, or an endpoint has been disconnected for longer than `down_after`.
   - *Idle:* no input data for longer than `idle_alert`.
   - Alerts are sent to a webhook (works with Slack, Mattermost, Teams, Discord, ntfy, …) and written to the event log.
-- **Settings:** webhook, password change, JSON export and import.
+- **Events:** one log of everything, filterable by level and searchable. It is also written to the event log file and survives restarts.
+- **Settings:** webhook, event log file, password change, JSON export and import.
 - **Help:** built-in documentation with tutorials, diagrams and annotated examples of every screen (`#/help`, or press `?`).
 
 ## REST API
@@ -244,9 +256,17 @@ Files:
 | File | Contents |
 |---|---|
 | `engine.go` | Data path: endpoints, framing, queues, reconnects |
-| `manager.go` | Lifecycle, persistence, metrics, alerts, events |
+| `manager.go` | Lifecycle, persistence, metrics, alerts |
+| `eventlog.go` | Event log in memory and in the log file (rotation, reload at startup) |
 | `capture.go` | Recording and replay |
 | `api.go` | HTTP API and authentication |
 | `web/` | Frontend, embedded into the binary |
 
 The web interface uses plain HTTP. If you expose it beyond a trusted network, put it behind a TLS reverse proxy.
+
+## AI disclaimer
+
+Delta was developed with substantial help from an AI coding assistant (Anthropic's Claude), under human direction and review.
+The code is covered by automated tests and was tested by hand, but it may still contain mistakes.
+Review it and test it in your own environment before relying on it, especially for safety-relevant navigation data.
+Delta is provided as is, without warranty of any kind.

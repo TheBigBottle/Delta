@@ -6,6 +6,7 @@
 # Local runtime data (config holds the password hash)
 /delta.json
 /delta-data/
+/delta-events.log*
 *.dcap
 
 # AI assistant files

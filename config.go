@@ -27,6 +27,9 @@ const (
 	defaultDataDir      = "delta-data"
 	defaultSessionHours = 24
 	defaultDownAfterSec = 30
+	defaultEventLog     = "delta-events.log"
+	defaultEventLogMB   = 10
+	eventLogOff         = "off" // event_log value that switches the log file off
 )
 
 // Config is the content of the config file.
@@ -38,11 +41,16 @@ type Config struct {
 	PasswordHash string `json:"password_hash,omitempty"`
 	// Password may be written into the file by hand in plain text, e.g. to
 	// reset a forgotten password. Delta hashes it on startup and removes it.
-	Password     string            `json:"password,omitempty"`
-	DataDir      string            `json:"data_dir"`      // where captures are stored (relative to the config file)
-	SessionHours int               `json:"session_hours"` // how long a login stays valid
-	Alerts       AlertConfig       `json:"alerts"`
-	Forwarders   []ForwarderConfig `json:"forwarders"`
+	Password     string `json:"password,omitempty"`
+	DataDir      string `json:"data_dir"`      // where captures are stored (relative to the config file)
+	SessionHours int    `json:"session_hours"` // how long a login stays valid
+	// EventLog is the file every event is appended to (relative to the config
+	// file, "off" = memory only). EventLogMaxMB is the size at which it is
+	// rotated; the previous part is kept as "<file>.1".
+	EventLog      string            `json:"event_log"`
+	EventLogMaxMB int               `json:"event_log_max_mb"`
+	Alerts        AlertConfig       `json:"alerts"`
+	Forwarders    []ForwarderConfig `json:"forwarders"`
 }
 
 type AlertConfig struct {
@@ -50,7 +58,8 @@ type AlertConfig struct {
 	DownAfterSeconds int    `json:"down_after"`  // how long a forwarder must be unhealthy before alerting
 }
 
-// ForwarderConfig describes one forwarder: one input whose data is copied to all outputs.
+// ForwarderConfig describes one forwarder: an input (which may receive from
+// several senders at once) whose data is copied to all outputs.
 type ForwarderConfig struct {
 	ID               string           `json:"id"`
 	Name             string           `json:"name"`
@@ -235,11 +244,13 @@ func (fc *ForwarderConfig) normalize() error {
 
 func defaultConfig() *Config {
 	return &Config{
-		Port:         defaultWebPort,
-		DataDir:      defaultDataDir,
-		SessionHours: defaultSessionHours,
-		Alerts:       AlertConfig{DownAfterSeconds: defaultDownAfterSec},
-		Forwarders:   []ForwarderConfig{},
+		Port:          defaultWebPort,
+		DataDir:       defaultDataDir,
+		EventLog:      defaultEventLog,
+		EventLogMaxMB: defaultEventLogMB,
+		SessionHours:  defaultSessionHours,
+		Alerts:        AlertConfig{DownAfterSeconds: defaultDownAfterSec},
+		Forwarders:    []ForwarderConfig{},
 	}
 }
 
@@ -276,6 +287,13 @@ func loadConfig(path string) (cfg *Config, err error) {
 	}
 	if cfg.DataDir == "" {
 		cfg.DataDir = defaultDataDir
+	}
+	cfg.EventLog = strings.TrimSpace(cfg.EventLog)
+	if cfg.EventLog == "" {
+		cfg.EventLog = defaultEventLog
+	}
+	if cfg.EventLogMaxMB <= 0 {
+		cfg.EventLogMaxMB = defaultEventLogMB
 	}
 	if cfg.SessionHours <= 0 {
 		cfg.SessionHours = defaultSessionHours

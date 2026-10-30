@@ -80,7 +80,7 @@ function svgBox(x, y, width, height, title, subtitle, cssClass = 'box') {
 
 /* ================= diagrams ================= */
 
-// The big picture: one input, copied once, one queue per output, many receivers.
+// The big picture: several senders into one input, copied once, one queue per output, many receivers.
 function helpOverviewDiagram() {
   const queueRows = [[45, 'Output 1', 'Chart plotter', 2], [100, 'Output 2', 'Navigation PC', 0], [155, 'Output 3', 'Logger', 5]];
   const queues = queueRows.map(([y, label, receiver, filledSlots]) => {
@@ -94,11 +94,13 @@ function helpOverviewDiagram() {
       + `<path d="M535 ${y + 20} H593" class="flow-out anim" marker-end="url(#help-arrow-out)"/>`
       + svgBox(595, y, 150, 40, receiver, '', 'box-out');
   }).join('');
-  return `<svg class="help-svg" viewBox="0 0 760 240" role="img" aria-label="Data flow from one source through Delta to three receivers">
-    ${svgBox(10, 95, 130, 50, 'GPS / AIS', 'source device')}
+  return `<svg class="help-svg" viewBox="0 0 760 240" role="img" aria-label="Data flow from two senders through Delta to three receivers">
+    ${svgBox(10, 55, 130, 44, 'GPS', 'sender 1')}
+    ${svgBox(10, 141, 130, 44, 'AIS', 'sender 2')}
     <rect x="175" y="12" width="380" height="216" rx="16" class="frame"/>
     ${svgText(190, 32, 'One Delta forwarder', 'strong accent', 'start')}
-    <path d="M140 120 H193" class="flow-in anim" marker-end="url(#help-arrow-in)"/>
+    <path d="M140 77 C 168 77, 165 112, 193 112" class="flow-in anim" marker-end="url(#help-arrow-in)"/>
+    <path d="M140 163 C 168 163, 165 128, 193 128" class="flow-in anim" marker-end="url(#help-arrow-in)"/>
     ${svgBox(195, 95, 100, 50, 'Input', 'e.g. UDP :10110', 'box-in')}
     <path d="M295 120 H314" class="flow-in"/>
     <circle cx="330" cy="120" r="15" class="box-in"/>${svgText(330, 124, '1×', 'strong')}
@@ -455,15 +457,17 @@ function helpForwarderJson(name, input, outputs, extra = {}) {
 // [id, title, icon, group, render function]. Groups become headings in the table of contents.
 const HELP_SECTIONS = [
   ['overview', 'What Delta does', 'info', 'Start here', () => `
-    <p>Delta receives a data stream on <b>one input</b> and sends a copy of every message to <b>one or more outputs</b>,
-      like a river that splits into the channels of a delta. It was built for NMEA 0183 (GPS, AIS, compass, wind …),
+    <p>Delta receives data on an <b>input</b> and sends a copy of every message to <b>one or more outputs</b>,
+      like a river that splits into the channels of a delta. An input can receive from <b>many senders at once</b>:
+      several devices connecting to a TCP port, several devices Delta connects to, or UDP datagrams from any number of hosts.
+      Their messages are merged into one stream. It was built for NMEA 0183 (GPS, AIS, compass, wind …),
       but works with any TCP or UDP data, including binary streams.</p>
-    ${helpFigure(helpOverviewDiagram(), 'One <b>forwarder</b> = one input + its outputs. Every message is copied once and shared by all outputs; each output has its own queue, so a slow receiver never holds up the others.')}
+    ${helpFigure(helpOverviewDiagram(), 'One <b>forwarder</b> = an input (with one or many senders) + its outputs. Every message is copied once and shared by all outputs; each output has its own queue, so a slow receiver never holds up the others.')}
     <h3>The words used in Delta</h3>
     <table class="t compact help-table">
       <thead><tr><th>Term</th><th>Meaning</th></tr></thead>
       <tbody>
-        <tr><td><b>Forwarder</b></td><td>One input and its outputs. You can run as many forwarders as you like, independently of each other.</td></tr>
+        <tr><td><b>Forwarder</b></td><td>An input and its outputs. The input can have many senders. You can run as many forwarders as you like, independently of each other.</td></tr>
         <tr><td><b>Input</b></td><td>Where the data comes from: a port Delta listens on, or one or more devices Delta connects to. ${helpLink('modes', 'Endpoint modes')}</td></tr>
         <tr><td><b>Output</b></td><td>Where a copy of the data goes: clients that connect to Delta, one or more devices Delta connects to, or UDP datagrams.</td></tr>
         <tr><td><b>Message</b></td><td>One unit of data. With the <i>NMEA / text lines</i> format a message is one sentence; with <i>raw</i> it is whatever arrived in one network read. ${helpLink('framing', 'Data format')}</td></tr>
@@ -477,7 +481,7 @@ const HELP_SECTIONS = [
       <li>Everything is stored in <b>one config file</b> (<code>delta.json</code>). Forwarders that were running come back by themselves after a restart or reboot.</li>
       <li>Forwarding is fast: about 31 µs from input to output on a local machine. The web interface never slows it down.</li>
       <li>Connections that break are retried automatically. You do not need to restart anything after a device reboots.</li>
-      <li>The event log (newest 5000 entries) and the traffic charts are kept in memory only; they start empty after Delta restarts.</li>
+      <li>The event log is written to a file (<code>delta-events.log</code> next to the config file, set in <a href="#/settings">Settings</a>), so it survives a restart. The traffic charts are kept in memory only and start empty after Delta restarts.</li>
     </ul>`],
 
   ['first-forwarder', 'Tutorial: your first forwarder', 'play', 'Start here', () => `
@@ -521,9 +525,9 @@ const HELP_SECTIONS = [
     ])}
     <h3>Other pages</h3>
     <ul>
-      <li><a href="#/events">Events</a>: one log of everything: starts, stops, connects, disconnects, errors and alerts. Filter by level (<span class="pill info">info</span> normal, <span class="pill warn">warn</span> Delta handles it itself, <span class="pill error">error</span> needs attention) or search. The newest 5000 events are kept in memory; Delta also writes every event to its own output (e.g. the systemd journal).</li>
+      <li><a href="#/events">Events</a>: one log of everything: starts, stops, connects, disconnects, errors and alerts. Filter by level (<span class="pill info">info</span> normal, <span class="pill warn">warn</span> Delta handles it itself, <span class="pill error">error</span> needs attention) or search. The newest 5000 events are shown. Every event is also appended to the event log file (one JSON object per line, rotated at a set size; see <a href="#/settings">Settings</a>), loaded again after a restart, and written to Delta's own output (e.g. the systemd journal).</li>
       <li><a href="#/captures">Captures</a>: all recordings, uploads and running replays.</li>
-      <li><a href="#/settings">Settings</a>: alerts, password, backup, and where the config file is.</li>
+      <li><a href="#/settings">Settings</a>: alerts, event log file, password, backup, and where the config file is.</li>
     </ul>
     <h3>Hints and shortcuts</h3>
     <p>Hover over any button, column header, tile or badge to get a short explanation.</p>
@@ -743,7 +747,7 @@ const HELP_SECTIONS = [
       <li>Messages for a TCP client output are kept in its queue while it is down and delivered once it is back.</li>
     </ul>`],
 
-  ['settings', 'Settings, password and backup', 'sliders', 'Reference', () => `
+  ['settings', 'Settings, event log, password and backup', 'sliders', 'Reference', () => `
     <h3>Password</h3>
     <ul>
       <li>On first start Delta asks you to choose a password (at least 8 characters). Until then nothing else works, and whoever opens the page first can choose it, so do it right away.</li>
@@ -761,9 +765,16 @@ const HELP_SECTIONS = [
   "password_hash": "pbkdf2-sha256$600000$…",
   "data_dir": "delta-data",
   "session_hours": 24,
+  "event_log": "delta-events.log",
+  "event_log_max_mb": 10,
   "alerts": { "webhook_url": "", "down_after": 30 },
   "forwarders": [ … ]
 }`)}
+    <h3>Event log file</h3>
+    <p>Every event is appended to <code>event_log</code> (default <code>delta-events.log</code>, relative to the config file), one JSON object per line.
+      When it reaches <code>event_log_max_mb</code> it is renamed to <code>&lt;file&gt;.1</code> and a new file is started, so the log never uses more than twice that size.
+      At startup the newest 5000 events are loaded from both files. Set <code>event_log</code> to <code>off</code> to keep events in memory only.
+      Both can be changed under <a href="#/settings">Settings → Event log</a> while Delta runs.</p>
     <h3>Starting Delta</h3>
     <table class="t compact help-table">
       <thead><tr><th>Option</th><th>Meaning</th></tr></thead>
@@ -803,7 +814,7 @@ curl -u :PASSWORD -X POST 'http://${location.host}/api/forwarders?start=1' \\
         <tr><td><code>GET /api/events</code></td><td>Event log, newest first (<code>?forwarder=&lt;id&gt;</code>, <code>?limit=</code>)</td></tr>
         <tr><td><code>GET /api/interfaces</code></td><td>IP addresses of the Delta machine (bind address choices)</td></tr>
         <tr><td><code>GET /api/export</code>, <code>POST /api/import</code></td><td>Backup and import of forwarders as <code>{"forwarders": […]}</code>; <code>?id=</code> (repeatable) exports only some</td></tr>
-        <tr><td><code>GET|PUT /api/settings</code></td><td>Alert settings and password (<code>{"webhook_url", "down_after"}</code>, or <code>{"current_password", "password"}</code>)</td></tr>
+        <tr><td><code>GET|PUT /api/settings</code></td><td>Alert settings, event log file and password (<code>{"webhook_url", "down_after"}</code>, <code>{"event_log", "event_log_max_mb"}</code>, or <code>{"current_password", "password"}</code>)</td></tr>
         <tr><td><code>POST /api/settings/test-webhook</code></td><td>Send a test message to <code>{"url": "…"}</code></td></tr>
         <tr><td><code>GET|POST /api/captures</code></td><td>List captures, upload a file</td></tr>
         <tr><td><code>GET|DELETE /api/captures/{name}</code></td><td>Download or delete a capture</td></tr>

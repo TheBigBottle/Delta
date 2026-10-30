@@ -6,10 +6,10 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"path/filepath"
 	"slices"
@@ -112,8 +112,12 @@ func newManager(configPath string, config *Config) *Manager {
 	m := &Manager{
 		configPath: configPath, config: config, dataDir: dataDir,
 		instances: map[string]*Instance{}, liveUpdates: bus,
-		events:     &EventLog{bus: bus},
+		events:     newEventLog(bus),
 		httpClient: &http.Client{Timeout: 10 * time.Second},
+	}
+	// Without a usable log file Delta still runs; the events are then kept in memory only.
+	if err := m.events.OpenFile(resolveEventLogPath(configPath, config.EventLog), int64(config.EventLogMaxMB)<<20); err != nil {
+		m.events.Add("error", "", "", err.Error()+" (events are kept in memory only)")
 	}
 	for _, fc := range config.Forwarders {
 		m.instances[fc.ID] = newInstance(fc)
@@ -654,6 +658,8 @@ func (m *Manager) postWebhook(url string, payload any) error {
 type SettingsUpdate struct {
 	WebhookURL       *string `json:"webhook_url,omitempty"`
 	DownAfterSeconds int     `json:"down_after"`
+	EventLog         *string `json:"event_log,omitempty"` // file path, relative to the config file, or "off"
+	EventLogMaxMB    int     `json:"event_log_max_mb"`
 	NewPassword      string  `json:"password,omitempty"`
 	CurrentPassword  string  `json:"current_password,omitempty"`
 }
@@ -702,6 +708,7 @@ func (m *Manager) Settings() map[string]any {
 	return map[string]any{
 		"webhook_url": m.config.Alerts.WebhookURL, "down_after": m.config.Alerts.DownAfterSeconds,
 		"config_path": m.configPath, "data_dir": m.dataDir, "version": version,
+		"event_log": m.config.EventLog, "event_log_max_mb": m.config.EventLogMaxMB, "event_log_path": m.events.FilePath(),
 		"port": m.config.Port, "bind": m.config.Bind, "web_addr": m.webAddress,
 	}
 }
@@ -723,6 +730,26 @@ func (m *Manager) UpdateSettings(update SettingsUpdate) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if update.EventLog != nil || update.EventLogMaxMB > 0 {
+		configured, maxMB := m.config.EventLog, m.config.EventLogMaxMB
+		if update.EventLog != nil {
+			if configured = strings.TrimSpace(*update.EventLog); configured == "" {
+				configured = defaultEventLog
+			}
+		}
+		if update.EventLogMaxMB > 0 {
+			maxMB = update.EventLogMaxMB
+		}
+		// Open the new file first: if that fails, nothing is changed.
+		path := resolveEventLogPath(m.configPath, configured)
+		if err := m.events.OpenFile(path, int64(maxMB)<<20); err != nil {
+			return err
+		}
+		if configured != m.config.EventLog {
+			m.events.Add("info", "", "", "event log file: "+cmp.Or(path, "off (memory only)"))
+		}
+		m.config.EventLog, m.config.EventLogMaxMB = configured, maxMB
+	}
 	if newHash != "" {
 		m.config.PasswordHash = newHash
 		m.events.Add("info", "", "", "password changed")
@@ -823,65 +850,6 @@ func (h *rateHistory) series() map[string]any {
 		bytesIn[i], bytesOut[i], messages[i] = h.samples[j].BytesIn, h.samples[j].BytesOut, h.samples[j].Messages
 	}
 	return map[string]any{"t": times, "in": bytesIn, "out": bytesOut, "msgs": messages}
-}
-
-// ---- event log ----
-
-type Event struct {
-	ID            uint64    `json:"id"`
-	Time          time.Time `json:"t"`
-	Level         string    `json:"level"` // info | warn | error
-	ForwarderID   string    `json:"fid,omitempty"`
-	ForwarderName string    `json:"name,omitempty"`
-	Message       string    `json:"msg"`
-}
-
-const eventLogCapacity = 5000
-
-// EventLog keeps the newest events in memory (a ring buffer), writes every
-// event to the process log and pushes it to the browsers.
-type EventLog struct {
-	mu     sync.Mutex
-	events []Event // ring buffer: the event with ID n is stored at index (n-1) % eventLogCapacity
-	lastID uint64
-	bus    *EventBus
-}
-
-func (log *EventLog) Add(level, forwarderID, forwarderName, message string) {
-	log.mu.Lock()
-	log.lastID++
-	event := Event{ID: log.lastID, Time: time.Now(), Level: level, ForwarderID: forwarderID, ForwarderName: forwarderName, Message: message}
-	if len(log.events) < eventLogCapacity {
-		log.events = append(log.events, event)
-	} else {
-		log.events[(event.ID-1)%eventLogCapacity] = event
-	}
-	log.mu.Unlock()
-
-	attrs := []any{"forwarder", forwarderName}
-	switch level {
-	case "error":
-		slog.Error(message, attrs...)
-	case "warn":
-		slog.Warn(message, attrs...)
-	default:
-		slog.Info(message, attrs...)
-	}
-	log.bus.Broadcast("event", event)
-}
-
-// NewestFirst returns up to limit events, newest first. If forwarderID is
-// set, only events of that forwarder are returned.
-func (log *EventLog) NewestFirst(forwarderID string, limit int) []Event {
-	log.mu.Lock()
-	defer log.mu.Unlock()
-	result := []Event{}
-	for id := log.lastID; id > 0 && log.lastID-id < uint64(len(log.events)) && len(result) < limit; id-- {
-		if event := log.events[(id-1)%eventLogCapacity]; forwarderID == "" || event.ForwarderID == forwarderID {
-			result = append(result, event)
-		}
-	}
-	return result
 }
 
 // ---- live updates to the browsers (server-sent events) ----

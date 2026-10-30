@@ -1,5 +1,5 @@
-// Delta – the NMEA Proxy. Named after a river delta: one stream of data
-// splits into many channels. Delta forwards TCP/UDP data streams (e.g. NMEA
+// Delta – the NMEA Proxy. Named after a river delta: the data arriving on an
+// input (from one sender or many) splits into many channels. Delta forwards TCP/UDP data streams (e.g. NMEA
 // telegrams) between endpoints and manages the forwarders through a password
 // protected web interface.
 //
@@ -8,7 +8,8 @@
 //	main.go     command line, startup and shutdown
 //	config.go   config file format, loading and saving
 //	engine.go   the data path: receiving, framing and sending data
-//	manager.go  forwarder lifecycle, persistence, rates, alerts, event log
+//	manager.go  forwarder lifecycle, persistence, rates, alerts
+//	eventlog.go the event log, kept in memory and in a log file
 //	capture.go  recording traffic to files and replaying it
 //	api.go      HTTP API, login and live streams for the web interface
 //	web/        the web interface (embedded into the binary)
@@ -87,6 +88,8 @@ func main() {
 		}
 	}()
 	slog.Info("delta started", "version", version, "web", "http://"+displayAddress(webBind, webPort), "config", *configPath)
+	// Recorded in the event log, so restarts are visible in its history.
+	manager.events.Add("info", "", "", "Delta "+version+" started")
 	if manager.NeedsPasswordSetup() {
 		// Until a password is set, whoever opens the web interface first can set it.
 		slog.Warn("no password set: open the web interface now to choose one", "web", "http://"+displayAddress(webBind, webPort))
@@ -103,6 +106,8 @@ func main() {
 	server.Shutdown(shutdownCtx)
 	close(stopSampler)
 	manager.Shutdown()
+	manager.events.Add("info", "", "", "Delta stopped")
+	manager.events.CloseFile()
 }
 
 // displayAddress returns an address that can be clicked in the startup log.

@@ -146,7 +146,7 @@ const ICON_PATHS = {
   help: '<circle cx="12" cy="12" r="9"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/>',
 };
 const icon = (name, extraClass = '') => `<svg class="i ${extraClass}" viewBox="0 0 24 24">${ICON_PATHS[name] || ''}</svg>`;
-// Logo: a river that splits into channels (a river delta), like one input fanning out to several outputs.
+// Logo: a river that splits into channels (a river delta), like an input fanning out to several outputs.
 const LOGO_SVG = '<svg viewBox="0 0 24 24"><path d="M12 3v6.5M12 9.5c0 4-4.5 6-6.5 11M12 9.5V20.5M12 9.5c0 4 4.5 6 6.5 11"/></svg>';
 const APP_NAME = 'Delta';
 const APP_TAGLINE = 'the NMEA Proxy';
@@ -1132,7 +1132,7 @@ function renderForwarderListPage(main) {
       $('#empty-message').innerHTML = visible.length ? '' : state.forwarders.length
         ? `<div class="empty">No forwarder matches the current filter.</div>`
         : `<div class="empty"><div class="big">${icon('layers')}</div><h2>No forwarders yet</h2>
-           <p>A forwarder receives data on one input and sends it to one or more outputs.</p>
+           <p>A forwarder receives data on an input, from one sender or many, and sends it to one or more outputs.</p>
            <div class="row" style="justify-content:center">
              <button class="btn primary" data-action="new">${icon('plus')}Create your first forwarder</button>
              <button class="btn" data-action="import">${icon('upload')}Import from file</button>
@@ -2732,6 +2732,15 @@ function renderSettingsPage(main) {
             <div class="row"><button class="btn primary">Save</button><button type="button" class="btn" id="test-webhook" title="Send a test message to the webhook URL above">Send test</button></div>
           </div>
         </form>
+        <form class="card" id="event-log-settings">
+          <div class="card-h">${icon('activity')}<h2>Event log</h2></div>
+          <div class="card-b stack">
+            <label class="f">Log file<input name="eventLog" value="${escapeHtml(settings.event_log)}" placeholder="delta-events.log" title="File every event is appended to. A relative path is next to the config file; off keeps the events in memory only"><span class="hint">Every event is appended to this file (one JSON object per line) and the newest 5000 are loaded again after a restart. A relative path is next to the config file. Enter <code>off</code> to keep events in memory only.</span></label>
+            <label class="f">Rotate at (MB)<input type="number" name="eventLogMaxMB" min="1" step="1" value="${settings.event_log_max_mb}" style="max-width:160px" title="When the file reaches this size it is renamed to .1 and a new file is started"><span class="hint">A full file is renamed to <code>&lt;file&gt;.1</code> (replacing the older one), so at most twice this size is used.</span></label>
+            <div class="muted" id="event-log-path" title="The file Delta is writing to right now">In use: ${escapeHtml(settings.event_log_path || 'off (memory only)')}</div>
+            <div class="row"><button class="btn primary" title="Switch to this log file and size">Save</button></div>
+          </div>
+        </form>
         <form class="card" id="password-settings">
           <div class="card-h">${icon('key')}<h2>Password</h2></div>
           <div class="card-b stack">
@@ -2761,6 +2770,7 @@ function renderSettingsPage(main) {
             <dt>Version</dt><dd>Delta ${escapeHtml(settings.version)}</dd>
             <dt>Config file</dt><dd>${escapeHtml(settings.config_path)}</dd>
             <dt>Data directory</dt><dd>${escapeHtml(settings.data_dir)}</dd>
+            <dt>Event log</dt><dd id="about-event-log">${escapeHtml(settings.event_log_path || 'off (memory only)')}</dd>
             <dt>Web interface</dt><dd>${escapeHtml(settings.web_addr)}${addressNote}</dd>
             <dt>REST API</dt><dd>curl -u :PASSWORD ${escapeHtml(location.origin)}/api/forwarders</dd>
           </dl></div>
@@ -2773,6 +2783,19 @@ function renderSettingsPage(main) {
       const form = event.target;
       await apiRequest('PUT', '/api/settings', { webhook_url: form.webhook.value.trim(), down_after: Number(form.downAfter.value) || 30 })
         .then(() => showToast('Alert settings saved')).catch(showError);
+    };
+    $('#event-log-settings', main).onsubmit = async event => {
+      event.preventDefault();
+      const form = event.target;
+      await apiRequest('PUT', '/api/settings', { event_log: form.eventLog.value.trim(), event_log_max_mb: Number(form.eventLogMaxMB.value) || 10 })
+        .then(saved => {
+          // Show the file actually in use (a relative path is resolved against the config file).
+          const inUse = saved.event_log_path || 'off (memory only)';
+          $('#event-log-path', main).textContent = `In use: ${inUse}`;
+          $('#about-event-log', main).textContent = inUse;
+          form.eventLog.value = saved.event_log;
+          showToast('Event log settings saved');
+        }).catch(showError);
     };
     $('#test-webhook', main).onclick = async () => {
       const url = $('#alert-settings', main).webhook.value.trim();

@@ -230,8 +230,14 @@ For ufw: `sudo ufw allow 10110/tcp`.
 go test -race ./...        # engine integration tests (fan-out, framing, reconnect, slow clients, leaks, latency)
 ```
 
-**Releases:** pushing a version tag (`git tag v1.3.0 && git push origin v1.3.0`) runs `.github/workflows/release.yml`,
-which builds all binaries with `./build.sh --all` and publishes them with checksums as a GitHub release.
+**Releases** are made locally with the [GitHub CLI](https://cli.github.com/) (`gh auth login` once):
+
+```bash
+VERSION=1.3.0 ./build.sh --all                       # tests + all binaries in dist/
+(cd dist && sha256sum delta-* > SHA256SUMS)
+git tag -a v1.3.0 -m "Delta 1.3.0" && git push origin v1.3.0
+gh release create v1.3.0 dist/delta-* dist/SHA256SUMS --title "Delta v1.3.0" --generate-notes
+```
 
 Files:
 

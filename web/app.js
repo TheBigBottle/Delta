@@ -132,7 +132,6 @@ const ICON_PATHS = {
   x: '<path d="M18 6 6 18M6 6l12 12"/>',
   back: '<path d="m15 18-6-6 6-6"/>',
   tag: '<path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0L2 12V2h10l8.6 8.6a2 2 0 0 1 0 2.8Z"/><circle cx="7" cy="7" r="1.5"/>',
-  folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/>',
   eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/>',
   users: '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>',
   alert: '<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4M12 17h.01"/>',
@@ -222,15 +221,14 @@ const peerNoun = mode => (mode === 'udp-listen' ? 'sources' : mode === 'tcp-list
 // The server sends config fields and live state in one object. configOf
 // extracts only the configuration (for editing and exporting).
 function configOf(fwd) {
-  const { id, name, group, tags, comment, framing, autostart, idle_alert, input, outputs, created } = fwd;
-  return { id, name, group, tags, comment, framing, autostart, idle_alert, input, outputs, created };
+  const { id, name, tags, comment, framing, autostart, idle_alert, input, outputs, created } = fwd;
+  return { id, name, tags, comment, framing, autostart, idle_alert, input, outputs, created };
 }
 
 // Make sure optional fields have safe defaults, so rendering never fails on
 // a missing field (fields may be left out of the JSON when empty).
 function normalizeForwarder(fwd) {
   fwd.tags = Array.isArray(fwd.tags) ? fwd.tags : [];
-  fwd.group = fwd.group || '';
   fwd.comment = fwd.comment || '';
   fwd.clients_in = fwd.clients_in || 0;
   fwd.clients_out = fwd.clients_out || 0;
@@ -297,7 +295,6 @@ const state = {
   lastSparklineSampleAt: 0,
   sort: preferences.get('sort', { key: 'name', direction: 1 }),
   filter: { text: '', status: 'all', tag: '' },
-  groupRows: preferences.get('group', false), // list view: show rows grouped by their group
   selectedIds: new Set(),       // list view: checked rows for bulk actions
   currentPage: null,            // hooks of the visible page (see top of file)
   liveStream: null,             // EventSource of /api/stream
@@ -709,19 +706,56 @@ function renderLoginPage(message = '') {
   };
 }
 
-// Shown on first start (no password in the config yet). Until a password is
-// set, the server refuses every other request.
-function renderSetupPage() {
+// The first-start page, shown while the config has no password yet. Until it
+// is submitted the server refuses every other request. Besides the password
+// (required) it asks for the main settings, filled with the values from the
+// config file (`defaults` from GET /api/setup), so a new installation can be
+// set up in one step. Everything can be changed later under Settings.
+function renderSetupPage(defaults = {}) {
+  const value = key => escapeHtml(defaults[key] ?? '');
   appRoot.innerHTML = `
     <div class="login">
-      <form class="card">
+      <form class="card setup-form" novalidate>
         <div class="logo">${LOGO_SVG}</div>
         <h1>Welcome to ${APP_NAME}</h1>
         <div class="tagline">${APP_TAGLINE}</div>
-        <p>Choose a password to protect the web interface. It is stored only as a secure hash.</p>
-        <input type="password" name="password" placeholder="New password (at least 8 characters)" autocomplete="new-password" minlength="8" required autofocus>
-        <input type="password" name="repeat" placeholder="Repeat password" autocomplete="new-password" required>
-        <button class="btn primary">Set password &amp; continue</button>
+        <p>First start: choose a password and check the basic settings. Everything except the password is optional and can be changed later.</p>
+
+        <div class="sect">
+          <div class="sect-t">${icon('key')}Password</div>
+          <div class="grid2">
+            <label class="f" title="Protects the web interface and the REST API. Stored only as a secure hash">Password<input type="password" name="password" placeholder="at least 8 characters" autocomplete="new-password" minlength="8" required autofocus></label>
+            <label class="f" title="Type the password again to rule out typos">Repeat<input type="password" name="repeat" placeholder="repeat password" autocomplete="new-password" required></label>
+          </div>
+        </div>
+
+        <div class="sect">
+          <div class="sect-t">${icon('sliders')}Web interface</div>
+          <div class="grid2">
+            <label class="f" title="Port of this web interface. A change takes effect after Delta restarts">Port<input type="number" name="port" min="1" max="65535" step="1" value="${value('port')}"></label>
+            <label class="f" title="IP address the web interface listens on. Empty = all interfaces. A change takes effect after Delta restarts">Bind address<input name="bind" value="${value('bind')}" placeholder="all interfaces"></label>
+          </div>
+          <label class="f" title="How long a login stays valid before you have to sign in again">Stay signed in for (hours)<input type="number" name="sessionHours" min="1" max="8760" step="1" value="${value('session_hours')}" style="max-width:160px"></label>
+          <div class="hint faint" id="setup-address-note">Currently reachable at ${value('web_addr')}. A new port or address takes effect after Delta restarts; the <code>-port</code> and <code>-bind</code> options override it.</div>
+        </div>
+
+        <div class="sect">
+          <div class="sect-t">${icon('download')}Files</div>
+          <label class="f" title="Where recorded captures are stored. A relative path is next to the config file">Data directory<input name="dataDir" value="${value('data_dir')}" placeholder="delta-data"></label>
+          <div class="grid2">
+            <label class="f" title="File every event is appended to (syslog-style text lines). A relative path is next to the config file; off keeps events in memory only">Event log file<input name="eventLog" value="${value('event_log')}" placeholder="delta-events.log"></label>
+            <label class="f" title="When the event log reaches this size it is renamed to .1 and a new file is started">Rotate event log at (MB)<input type="number" name="eventLogMaxMB" min="1" step="1" value="${value('event_log_max_mb')}"></label>
+          </div>
+          <div class="hint faint">Config file: ${value('config_path')}. Relative paths are resolved next to it.</div>
+        </div>
+
+        <div class="sect">
+          <div class="sect-t">${icon('bell')}Alerts</div>
+          <label class="f" title="Optional. Receives a JSON POST when an alert fires or resolves (Slack, Mattermost, Teams, Discord, ntfy …)">Webhook URL<input name="webhook" value="${value('webhook_url')}" placeholder="optional, e.g. https://hooks.slack.com/…"></label>
+          <label class="f" title="A forwarder that failed to start or has a disconnected endpoint for this long raises an alert">Alert when a forwarder is down for (s)<input type="number" name="downAfter" min="1" step="1" value="${value('down_after')}" style="max-width:160px"></label>
+        </div>
+
+        <button class="btn primary" title="Save the password and these settings, then open Delta">Save &amp; start</button>
         <div class="form-err" style="text-align:center;margin:0"></div>
       </form>
       ${WAVES_SVG}
@@ -732,11 +766,22 @@ function renderSetupPage() {
     event.preventDefault();
     if (form.password.value.length < 8) return showFormError('The password must have at least 8 characters.');
     if (form.password.value !== form.repeat.value) return showFormError('The passwords do not match.');
-    const button = $('button', form);
+    const button = $('button.primary', form);
     button.disabled = true;
     try {
-      await apiRequest('POST', '/api/setup', { password: form.password.value }); // also logs us in
+      const result = await apiRequest('POST', '/api/setup', { // also logs us in
+        password: form.password.value,
+        port: Number(form.port.value) || 0,
+        bind: form.bind.value.trim(),
+        session_hours: Number(form.sessionHours.value) || 0,
+        data_dir: form.dataDir.value.trim(),
+        event_log: form.eventLog.value.trim(),
+        event_log_max_mb: Number(form.eventLogMaxMB.value) || 0,
+        webhook_url: form.webhook.value.trim(),
+        down_after: Number(form.downAfter.value) || 0,
+      });
       startApp();
+      if (result.restart_needed) showToast('Settings saved. The new web port / address takes effect after Delta restarts.');
     } catch (error) {
       showFormError(error.message);
       button.disabled = false;
@@ -749,7 +794,7 @@ function renderSetupPage() {
 async function showEntryPage(loginMessage = '') {
   try {
     const setup = await apiRequest('GET', '/api/setup');
-    if (setup.setup_required) return renderSetupPage();
+    if (setup.setup_required) return renderSetupPage(setup.defaults);
   } catch { /* server unreachable: fall through to the login form */ }
   try {
     await apiRequest('GET', '/api/session');
@@ -977,8 +1022,6 @@ function renderForwarderListPage(main) {
             .map(([value, label, hint]) => `<button data-status="${value}" class="${state.filter.status === value ? 'on' : ''}" title="${hint}">${label}</button>`).join('')}
         </div>
         <select id="tag-filter" title="Show only forwarders with this tag"></select>
-        <span class="grow"></span>
-        <label class="chk" title="Show the forwarders in sections by their group">${icon('folder')}<input type="checkbox" id="group-rows" ${state.groupRows ? 'checked' : ''}> Group</label>
       </div>
       <div class="tbl-wrap" style="margin-top:8px"><table class="t">
         <thead id="table-head"></thead>
@@ -1001,7 +1044,7 @@ function renderForwarderListPage(main) {
       if (status === 'issues' && !hasIssue(fwd)) return false;
       if (state.filter.tag && !fwd.tags.includes(state.filter.tag)) return false;
       if (searchText) {
-        const searchable = [fwd.name, fwd.group, fwd.comment, ...fwd.tags, fwd.input.mode, ...allEndpointAddresses(fwd.input),
+        const searchable = [fwd.name, fwd.comment, ...fwd.tags, fwd.input.mode, ...allEndpointAddresses(fwd.input),
           ...fwd.outputs.flatMap(out => [out.mode, out.name, ...allEndpointAddresses(out)])].join(' ').toLowerCase();
         if (!searchable.includes(searchText)) return false;
       }
@@ -1009,10 +1052,6 @@ function renderForwarderListPage(main) {
     });
     const sortValue = SORT_VALUE[state.sort.key] || SORT_VALUE.name;
     visible.sort((a, b) => {
-      if (state.groupRows) { // group first, ungrouped last
-        const groupA = a.group || '\uffff', groupB = b.group || '\uffff';
-        if (groupA !== groupB) return groupA < groupB ? -1 : 1;
-      }
       const valueA = sortValue(a), valueB = sortValue(b);
       return (valueA < valueB ? -1 : valueA > valueB ? 1 : 0) * state.sort.direction;
     });
@@ -1103,7 +1142,6 @@ function renderForwarderListPage(main) {
       <button class="btn sm" data-bulk="stop" title="Stop all selected forwarders">${icon('stop')}Stop</button>
       <button class="btn sm" data-bulk="restart" title="Restart all selected forwarders">${icon('restart')}Restart</button>
       <button class="btn sm" data-bulk="tag" title="Add a tag to (or remove it from) the selected forwarders">${icon('tag')}Tag</button>
-      <button class="btn sm" data-bulk="group" title="Move the selected forwarders into a group">${icon('folder')}Group</button>
       <button class="btn sm" data-bulk="export" title="Download the selected forwarders as a JSON file">${icon('download')}Export</button>
       <button class="btn sm" data-bulk="delete" title="Stop and delete the selected forwarders">${icon('trash')}Delete</button>
       <button class="btn sm icon" data-bulk="clear" title="Clear selection">${icon('x')}</button></div>` : '';
@@ -1114,20 +1152,14 @@ function renderForwarderListPage(main) {
     renderSummaryTiles();
     renderTagFilter();
 
-    const newSignature = JSON.stringify([state.groupRows, state.sort, state.filter.tag,
-      visible.map(fwd => [fwd.id, fwd.name, fwd.tags, fwd.group, fwd.comment, fwd.health, fwd.state, fwd.error, fwd.firing, !!fwd.capture,
+    const newSignature = JSON.stringify([state.sort, state.filter.tag,
+      visible.map(fwd => [fwd.id, fwd.name, fwd.tags, fwd.comment, fwd.health, fwd.state, fwd.error, fwd.firing, !!fwd.capture,
         fwd.input, fwd.outputs, fwd.in_status?.state, fwd.in_status?.error, fwd.out_status?.map(out => [out.state, out.error]), state.selectedIds.has(fwd.id)])]);
     if (newSignature !== tableSignature) {
       tableSignature = newSignature;
       renderTableHead(visible);
-      let rowsHtml = '', currentGroup = null;
-      for (const fwd of visible) {
-        if (state.groupRows && fwd.group !== currentGroup) {
-          currentGroup = fwd.group;
-          rowsHtml += `<tr class="grp"><td colspan="${LIST_COLUMNS.length}">${icon('folder')} ${escapeHtml(currentGroup || 'Ungrouped')}</td></tr>`;
-        }
-        rowsHtml += renderRow(fwd);
-      }
+      let rowsHtml = '';
+      for (const fwd of visible) rowsHtml += renderRow(fwd);
       $('#table-body').innerHTML = rowsHtml;
       $('#empty-message').innerHTML = visible.length ? '' : state.forwarders.length
         ? `<div class="empty">No forwarder matches the current filter.</div>`
@@ -1168,9 +1200,6 @@ function renderForwarderListPage(main) {
         const remove = tag.startsWith('-');
         await apiRequest('POST', '/api/bulk', { ids, action: remove ? 'untag' : 'tag', value: remove ? tag.slice(1) : tag }).catch(showError);
       }
-    } else if (action === 'group') {
-      const group = await askForText('Move to group', `Group for ${ids.length} forwarder(s)`, '', 'Leave empty to remove from group.');
-      if (group !== null) await apiRequest('POST', '/api/bulk', { ids, action: 'group', value: group }).catch(showError);
     } else {
       await setForwardersRunning(ids, action); // start / stop / restart
     }
@@ -1224,9 +1253,6 @@ function renderForwarderListPage(main) {
       }
     } else if (target.id === 'tag-filter') {
       state.filter.tag = target.value;
-    } else if (target.id === 'group-rows') {
-      state.groupRows = target.checked;
-      preferences.set('group', state.groupRows);
     }
     update();
   };
@@ -1255,7 +1281,7 @@ function renderForwarderListPage(main) {
 function newForwarderTemplate() {
   // 10110 is the common port for NMEA over IP.
   return {
-    name: '', group: '', tags: [], framing: 'lines', idle_alert: 0,
+    name: '', tags: [], framing: 'lines', idle_alert: 0,
     input: { mode: 'tcp-listen', host: '', port: 10110 },
     outputs: [{ mode: 'tcp-listen', host: '', port: 10111 }],
   };
@@ -1345,7 +1371,6 @@ function openForwarderEditor(existing) {
   if (isNew) delete draft.id;
   draft.tags = draft.tags || [];
   const isRunning = !isNew && state.forwardersById.get(existing.id)?.state === 'running';
-  const existingGroups = [...new Set(state.forwarders.map(fwd => fwd.group).filter(Boolean))];
 
   const overlay = openModal(`
     <form novalidate>
@@ -1354,11 +1379,9 @@ function openForwarderEditor(existing) {
         <div class="sect">
           <div class="grid2">
             <label class="f" title="A name you recognize, e.g. where the data comes from">Name<input data-path="name" value="${escapeHtml(draft.name)}" required placeholder="e.g. GPS bridge deck"></label>
-            <label class="f" title="Optional. The forwarder list can be grouped by this">Group<input data-path="group" value="${escapeHtml(draft.group || '')}" placeholder="optional" list="known-groups"></label>
-          </div>
-          <datalist id="known-groups">${existingGroups.map(group => `<option value="${escapeHtml(group)}">`).join('')}</datalist>
-          <div class="grid2">
             <label class="f" title="Optional keywords for filtering, e.g. gps, ais, bridge">Tags<input data-path="tags" value="${escapeHtml(draft.tags.join(', '))}" placeholder="comma separated"></label>
+          </div>
+          <div class="grid2">
             <label class="f">Idle alert (s)<input type="number" min="0" data-path="idle_alert" value="${draft.idle_alert || ''}" placeholder="off"><span class="hint">Alert when no data arrives for this long</span></label>
           </div>
           <label class="f" title="Free-text notes for you and your colleagues, e.g. where the device is, who to call, or why the forwarder exists. Shown on the detail page">Comment<textarea data-path="comment" rows="2" maxlength="4000" placeholder="optional notes">${escapeHtml(draft.comment || '')}</textarea></label>
@@ -1607,7 +1630,6 @@ function renderDetailPage(main, forwarderId) {
     setHtmlIfChanged($('#detail-title', content),
       `${escapeHtml(fwd.name)} <span class="pill ${healthClass(fwd.health)}" style="vertical-align:3px;margin-left:6px">${HEALTH_LABELS[fwd.health]}</span>`);
     setHtmlIfChanged($('#detail-subtitle', content), [
-      fwd.group && `${icon('folder')} ${escapeHtml(fwd.group)}`,
       fwd.tags.map(tag => `<span class="tag">${escapeHtml(tag)}</span>`).join(' '),
       fwd.framing === 'lines' ? 'NMEA / line framing' : 'Raw stream',
       isRunning ? `running for ${formatDuration(Date.now() - new Date(fwd.since))}` : `${fwd.state} since ${formatDateTime(fwd.since)}`,
@@ -2735,7 +2757,7 @@ function renderSettingsPage(main) {
         <form class="card" id="event-log-settings">
           <div class="card-h">${icon('activity')}<h2>Event log</h2></div>
           <div class="card-b stack">
-            <label class="f">Log file<input name="eventLog" value="${escapeHtml(settings.event_log)}" placeholder="delta-events.log" title="File every event is appended to. A relative path is next to the config file; off keeps the events in memory only"><span class="hint">Every event is appended to this file (one JSON object per line) and the newest 5000 are loaded again after a restart. A relative path is next to the config file. Enter <code>off</code> to keep events in memory only.</span></label>
+            <label class="f">Log file<input name="eventLog" value="${escapeHtml(settings.event_log)}" placeholder="delta-events.log" title="File every event is appended to. A relative path is next to the config file; off keeps the events in memory only"><span class="hint">Every event is appended to this file (one syslog-style text line per event) and the newest 5000 are loaded again after a restart. A relative path is next to the config file. Enter <code>off</code> to keep events in memory only.</span></label>
             <label class="f">Rotate at (MB)<input type="number" name="eventLogMaxMB" min="1" step="1" value="${settings.event_log_max_mb}" style="max-width:160px" title="When the file reaches this size it is renamed to .1 and a new file is started"><span class="hint">A full file is renamed to <code>&lt;file&gt;.1</code> (replacing the older one), so at most twice this size is used.</span></label>
             <div class="muted" id="event-log-path" title="The file Delta is writing to right now">In use: ${escapeHtml(settings.event_log_path || 'off (memory only)')}</div>
             <div class="row"><button class="btn primary" title="Switch to this log file and size">Save</button></div>

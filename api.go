@@ -180,28 +180,32 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"setup_required": s.manager.NeedsPasswordSetup()})
+	if !s.manager.NeedsPasswordSetup() {
+		writeJSON(w, http.StatusOK, map[string]any{"setup_required": false})
+		return
+	}
+	// Only while setup is pending: the values the first-start page starts with.
+	writeJSON(w, http.StatusOK, map[string]any{"setup_required": true, "defaults": s.manager.SetupDefaults()})
 }
 
-// handleSetup sets the first password and logs the browser in. It only
-// works while no password exists (enforced by SetInitialPassword).
+// handleSetup saves the first password and settings and logs the browser in.
+// It only works while no password exists (enforced by CompleteSetup).
 func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
-	var request struct {
-		Password string `json:"password"`
-	}
+	var request InitialSetup
 	if err := readJSON(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	s.loginMu.Lock()
 	defer s.loginMu.Unlock()
-	if err := s.manager.SetInitialPassword(request.Password); err != nil {
+	restartNeeded, err := s.manager.CompleteSetup(request)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	slog.Info("initial password set", "from", r.RemoteAddr)
+	slog.Info("first-start setup completed", "from", r.RemoteAddr)
 	s.startSession(w, r)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "restart_needed": restartNeeded})
 }
 
 // startSession creates a new session and sends its cookie to the browser.
@@ -358,7 +362,7 @@ func (s *Server) handleBulk(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		IDs    []string `json:"ids"`
 		Action string   `json:"action"`
-		Value  string   `json:"value"` // tag or group name
+		Value  string   `json:"value"` // tag name
 	}
 	if err := readJSON(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -370,8 +374,8 @@ func (s *Server) handleBulk(w http.ResponseWriter, r *http.Request) {
 		err = s.manager.SetRunning(request.Action, request.IDs...)
 	case "delete":
 		err = s.manager.Delete(request.IDs...)
-	case "tag", "untag", "group":
-		err = s.manager.UpdateTagsOrGroup(request.Action, request.Value, request.IDs...)
+	case "tag", "untag":
+		err = s.manager.UpdateTags(request.Action, request.Value, request.IDs...)
 	default:
 		err = fmt.Errorf("unknown action %q", request.Action)
 	}

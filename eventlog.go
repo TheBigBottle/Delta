@@ -3,18 +3,26 @@ package main
 // The event log: everything Delta reports (starts, stops, connects, errors,
 // alerts). The newest events are kept in memory for the web interface, and
 // every event is also appended to a log file, so the history survives a
-// restart. The file has one JSON object per line and is rotated when it
-// gets too big (the old part is kept as "<file>.1").
+// restart. The file is rotated when it gets too big (the old part is kept
+// as "<file>.1").
+//
+// The file uses a syslog-style text format (timestamp as in RFC 5424), one
+// event per line, so it can be read with less, grep or any log tool:
+//
+//	2026-10-30T20:37:39.059+01:00 myhost delta[1234]: INFO Delta 1.3.0 started
+//	2026-10-30T20:37:41.112+01:00 myhost delta[1234]: ERROR [f3a9c2e17b04] GPS bridge: connect 10.0.0.5:4001: connection refused
+//
+// Events of a forwarder carry its ID in brackets and its name before the colon.
 
 import (
 	"bufio"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -159,8 +167,7 @@ func (log *EventLog) loadFromFilesLocked(path string) {
 		scanner := bufio.NewScanner(file)
 		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 		for scanner.Scan() {
-			var event Event
-			if json.Unmarshal(scanner.Bytes(), &event) == nil && event.Message != "" {
+			if event, ok := parseLogLine(scanner.Text()); ok {
 				loaded = append(loaded, event)
 			}
 		}
@@ -183,8 +190,7 @@ func (log *EventLog) appendToFileLocked(event Event) {
 	if log.file == nil {
 		return
 	}
-	line, _ := json.Marshal(event)
-	line = append(line, '\n')
+	line := []byte(formatLogLine(event))
 	if log.maxFileSize > 0 && log.fileSize > 0 && log.fileSize+int64(len(line)) > log.maxFileSize {
 		log.rotateLocked()
 		if log.file == nil {
@@ -226,6 +232,68 @@ func (log *EventLog) FilePath() string {
 	return log.filePath
 }
 
+// ---- the line format ----
+
+const logTimeFormat = "2006-01-02T15:04:05.000Z07:00" // RFC 3339 with milliseconds, as rsyslog writes it
+
+// The host name and process ID in every line, as in syslog.
+var logHostName, logProcessTag = func() (string, string) {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "localhost"
+	}
+	return strings.Fields(host)[0], "delta[" + strconv.Itoa(os.Getpid()) + "]:"
+}()
+
+// Syslog severity names used in the file, and the event levels they stand for.
+var levelToSeverity = map[string]string{"info": "INFO", "warn": "WARNING", "error": "ERROR"}
+var severityToLevel = map[string]string{"INFO": "info", "WARNING": "warn", "ERROR": "error"}
+
+// oneLine replaces line breaks, so every event stays on one line.
+func oneLine(text string) string {
+	return strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(text)
+}
+
+// formatLogLine returns the event as one line of the log file, including the newline.
+func formatLogLine(event Event) string {
+	severity := levelToSeverity[event.Level]
+	if severity == "" {
+		severity = "INFO"
+	}
+	var line strings.Builder
+	line.WriteString(event.Time.Format(logTimeFormat) + " " + logHostName + " " + logProcessTag + " " + severity + " ")
+	if event.ForwarderID != "" {
+		line.WriteString("[" + event.ForwarderID + "] " + oneLine(event.ForwarderName) + ": ")
+	}
+	line.WriteString(oneLine(event.Message) + "\n")
+	return line.String()
+}
+
+// parseLogLine reads a line written by formatLogLine. Lines in another format
+// are skipped (ok = false). A forwarder name containing ": " cannot be told
+// apart from the message; the rest of it then ends up in the message.
+func parseLogLine(line string) (event Event, ok bool) {
+	// timestamp host tag severity rest
+	fields := strings.SplitN(line, " ", 5)
+	if len(fields) < 5 {
+		return Event{}, false
+	}
+	timestamp, err := time.Parse(logTimeFormat, fields[0])
+	level, knownSeverity := severityToLevel[fields[3]]
+	if err != nil || !knownSeverity || !strings.HasPrefix(fields[2], "delta[") {
+		return Event{}, false
+	}
+	event = Event{Time: timestamp, Level: level, Message: fields[4]}
+	if rest, isForwarder := strings.CutPrefix(fields[4], "["); isForwarder {
+		if id, afterID, found := strings.Cut(rest, "] "); found {
+			if name, message, found := strings.Cut(afterID, ": "); found {
+				event.ForwarderID, event.ForwarderName, event.Message = id, name, message
+			}
+		}
+	}
+	return event, event.Message != ""
+}
+
 // resolveEventLogPath turns the configured event_log value into a file path:
 // "off" switches the file log off, a relative path is resolved against the
 // directory of the config file.
@@ -237,8 +305,5 @@ func resolveEventLogPath(configPath, configured string) string {
 	if configured == "" {
 		configured = defaultEventLog
 	}
-	if !filepath.IsAbs(configured) {
-		configured = filepath.Join(filepath.Dir(configPath), configured)
-	}
-	return configured
+	return resolveNextToConfig(configPath, configured)
 }

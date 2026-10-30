@@ -121,7 +121,6 @@ Forwarders without an `id` get one automatically.
   "forwarders": [
     {
       "name": "GPS bridge",
-      "group": "Bridge",
       "tags": ["nmea"],
       "comment": "Gateway on the bridge, mast cable",
       "framing": "lines",
@@ -140,7 +139,12 @@ Forwarders without an `id` get one automatically.
 - `comment` holds free-text notes (up to 4000 characters), shown on the detail page and as a note icon in the list.
 - `autostart` records whether the forwarder was running. Forwarders that were running come back after a restart or reboot.
 - `data_dir` is where captures are stored. A relative path is resolved against the config file's directory.
-- `event_log` is the file every event (starts, stops, connects, errors, alerts) is appended to, one JSON object per line.
+- `event_log` is the file every event (starts, stops, connects, errors, alerts) is appended to, one line per event in a syslog-style format:
+  ```
+  2026-10-30T20:37:39.059+01:00 myhost delta[1234]: INFO Delta 1.3.0 started
+  2026-10-30T20:37:41.112+01:00 myhost delta[1234]: ERROR [f3a9c2e17b04] GPS bridge: connect 10.0.0.5:4001: connection refused
+  ```
+  Severity is `INFO`, `WARNING` or `ERROR`; events of a forwarder carry its ID in brackets and its name before the colon.
   A relative path is resolved against the config file's directory; `off` keeps events in memory only.
   At startup the newest 5000 events are loaded again, so the event list survives a restart.
 - `event_log_max_mb` (default 10): when the event log reaches this size it is renamed to `<file>.1` (replacing the older one)
@@ -175,7 +179,7 @@ Measured on loopback (`go test -run Latency -v`), TCP source → Delta → TCP c
 
 ## Web interface
 
-- **Forwarders:** sortable and filterable list with tags, groups, comments, live throughput sparklines, clients in/out, and bulk start/stop/restart/tag/delete/export.
+- **Forwarders:** sortable and filterable list with tags, comments, live throughput sparklines, clients in/out, and bulk start/stop/restart/tag/delete/export.
 - **Detail page:**
   - A live diagram of the input and outputs, with their states.
   - A throughput chart covering the last 10 minutes.

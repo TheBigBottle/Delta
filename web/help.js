@@ -93,20 +93,31 @@ function helpOverviewDiagram() {
   const dataLine = (fromX, toX, centerY, kind) =>
     `<path d="M${fromX} ${centerY + 6} H${toX}" class="flow-${kind} anim" marker-end="url(#help-arrow-${kind})"/>`;
 
-  // Input side: two alternatives, each with two senders. [header, mode note, delta opens the connection, senders, top y]
+  // Input side: two alternatives, each with its input modes and two senders.
+  // [header, input modes, delta opens the connection, senders, top y]
+  const inputCenterY = 220;
   const inputAlternatives = [
-    ['Either: Delta is the server', 'tcp-listen / udp-listen', false, [['GPS', 'connects to Delta'], ['AIS', 'connects to Delta']], 65],
-    ['or: Delta is the client', 'tcp-connect / udp-connect', true, [['Compass', 'Delta connects'], ['Wind sensor', 'Delta connects']], 255],
+    ['Either: Delta is the server', ['tcp-listen', 'udp-listen'], false, [['GPS', 'connects to Delta'], ['AIS', 'connects to Delta']], 75],
+    ['or: Delta is the client', ['tcp-connect', 'udp-connect'], true, [['Compass', 'Delta connects'], ['Wind sensor', 'Delta connects']], 275],
   ];
-  const inputSide = inputAlternatives.map(([header, modeNote, deltaConnects, senders, top]) =>
-    svgText(10, top - 13, header, 'small strong accent', 'start')
-    + senders.map(([name, sub], index) => {
-      const y = top + index * 50, centerY = y + rowHeight / 2;
-      return svgBox(10, y, 110, rowHeight, name, sub)
-        + (deltaConnects ? connectionArrow(173, 124, centerY) : connectionArrow(122, 171, centerY))
-        + dataLine(120, 173, centerY, 'in');
-    }).join('')
-    + svgText(10, top + 110, modeNote, 'small muted', 'start')).join('');
+  const inputSide = inputAlternatives.map(([header, modes, deltaConnects, senders, top]) => {
+    const boxCenterY = top + 45;
+    return svgText(10, top - 13, header, 'small strong accent', 'start')
+      + senders.map(([name, sub], index) => {
+        const y = top + index * 50, centerY = y + rowHeight / 2;
+        return svgBox(10, y, 110, rowHeight, name, sub)
+          + (deltaConnects ? connectionArrow(173, 124, centerY) : connectionArrow(122, 171, centerY))
+          + dataLine(120, 173, centerY, 'in');
+      }).join('')
+      // The input box names its modes, like the output boxes do.
+      + `<rect x="175" y="${top}" width="90" height="90" rx="9" class="box-in"/>`
+      + svgText(220, boxCenterY - 12, 'Input', 'strong')
+      + modes.map((mode, index) => svgText(220, boxCenterY + 5 + index * 13, mode, 'small muted')).join('')
+      // Straight down (upper box) or up (lower box) into the "copied once" circle between them.
+      + (top < inputCenterY
+        ? `<path d="M220 ${top + 90} V204" class="flow-in anim" marker-end="url(#help-arrow-in)"/>`
+        : `<path d="M220 ${top} V236" class="flow-in anim" marker-end="url(#help-arrow-in)"/>`);
+  }).join('');
 
   // Output side: three outputs of different modes in the same forwarder. [title, mode, header, delta connects (null = no connection), receivers, filled queue slots per receiver, top y]
   const outputs = [
@@ -114,10 +125,9 @@ function helpOverviewDiagram() {
     ['Output 2', 'tcp-connect', 'Delta connects to targets', true, ['Navigation PC', 'Logger'], [1, 5], 225],
     ['Output 3', 'udp-send', 'Delta sends datagrams', null, ['Display'], [0], 340],
   ];
-  const inputCenterY = 220;
   const outputSide = outputs.map(([title, mode, header, deltaConnects, receivers, filledSlots, top]) => {
     const boxHeight = receivers.length * 50 - 10, boxCenterY = top + boxHeight / 2;
-    let html = `<path d="M306 ${inputCenterY} C 318 ${inputCenterY}, 316 ${boxCenterY}, 328 ${boxCenterY}" class="flow-in anim" marker-end="url(#help-arrow-in)"/>`
+    let html = `<path d="M234 ${inputCenterY} C 285 ${inputCenterY}, 280 ${boxCenterY}, 328 ${boxCenterY}" class="flow-in anim" marker-end="url(#help-arrow-in)"/>`
       + `<rect x="330" y="${top}" width="175" height="${boxHeight}" rx="9" class="box"/>`
       + svgText(340, boxCenterY - 3, title, 'strong', 'start') + svgText(340, boxCenterY + 12, mode, 'small muted', 'start')
       + svgText(600, top - 8, header, 'small strong out', 'start');
@@ -137,10 +147,9 @@ function helpOverviewDiagram() {
     <rect x="160" y="12" width="360" height="388" rx="16" class="frame"/>
     ${svgText(175, 32, 'One Delta forwarder', 'strong accent', 'start')}
     ${inputSide}
-    ${svgBox(175, 60, 90, 320, 'Input', 'one mode', 'box-in')}
-    <path d="M265 ${inputCenterY} H276" class="flow-in"/>
-    <circle cx="291" cy="${inputCenterY}" r="14" class="box-in"/>${svgText(291, inputCenterY + 4, '1×', 'strong')}
-    ${svgText(291, inputCenterY - 34, 'copied', 'small muted')}${svgText(291, inputCenterY - 22, 'once', 'small muted')}
+    ${svgText(65, inputCenterY + 4, 'or', 'strong muted')}
+    <circle cx="220" cy="${inputCenterY}" r="14" class="box-in"/>${svgText(220, inputCenterY + 4, '1×', 'strong')}
+    ${svgText(201, inputCenterY - 2, 'copied', 'small muted', 'end')}${svgText(201, inputCenterY + 10, 'once', 'small muted', 'end')}
     ${outputSide}
     <path d="M170 425 H200" class="flow-in"/><path d="M204 425 H234" class="flow-out"/>${svgText(242, 429, 'data', 'small muted', 'start')}
     <path d="M300 425 H336" class="flow-muted dashed" marker-end="url(#help-arrow-muted)"/>${svgText(344, 429, 'opens the connection', 'small muted', 'start')}
@@ -334,10 +343,9 @@ function helpEditorMockup() {
       <div class="sect">
         <div class="grid2">
           <label class="f"><span class="row">${helpMarker(1)}Name</span><input value="GPS bridge"></label>
-          <label class="f">Group<input value="Bridge"></label>
+          <label class="f">Tags<input value="gps, nmea"></label>
         </div>
         <div class="grid2">
-          <label class="f">Tags<input value="gps, nmea"></label>
           <label class="f">Idle alert (s)<input value="10"><span class="hint">Alert when no data arrives for this long</span></label>
         </div>
         <label class="f">Comment<textarea rows="2">GPS gateway on the bridge, mast cable. Call Jan before restarting.</textarea></label>
@@ -380,8 +388,6 @@ function helpListMockup() {
       ${helpMarker(1)}<div class="search">${icon('search')}<input placeholder="Search…"></div>
       ${helpMarker(2)}<div class="seg"><button class="on">All</button><button>Running</button><button>Issues</button><button>Stopped</button></div>
       <select><option>All tags</option></select>
-      <span class="grow"></span>
-      <label class="chk">${icon('folder')}<input type="checkbox"> Group</label>
     </div>
     <div class="tbl-wrap" style="margin-top:8px"><table class="t">
       <thead><tr><th style="width:34px"><input type="checkbox"></th><th>Name</th><th>Input</th><th>Outputs</th><th class="right">Traffic in</th><th class="right">Msg/s</th><th class="right">Clients in</th><th class="right">Clients out</th><th class="right">Drops</th><th></th></tr></thead>
@@ -412,7 +418,7 @@ function helpDetailMockup() {
     <div class="page-head" style="margin-bottom:14px">
       <span class="dot ok"></span>
       <div class="grow"><h1>GPS bridge <span class="pill ok" style="vertical-align:3px;margin-left:6px">Running</span></h1>
-        <div class="sub">${icon('folder')} Bridge · NMEA / line framing · running for 3h 12m</div></div>
+        <div class="sub"><span class="tag">gps</span> · NMEA / line framing · running for 3h 12m</div></div>
       ${helpMarker(1)}
       <div class="row"><button class="btn stop">${icon('stop')}Stop</button><button class="btn">${icon('restart')}Restart</button><button class="btn">${icon('edit')}Edit</button></div>
     </div>
@@ -527,7 +533,7 @@ const HELP_SECTIONS = [
       connect to Delta over TCP on port <code>10111</code> and all get the same data.</p>
     ${helpFigure(helpEditorMockup(), 'The “New forwarder” dialog. The numbers match the steps below.', true)}
     ${helpSteps([
-      ['Open the dialog', `On the <a href="#/">Forwarders</a> page click <b>New forwarder</b> (or press ${helpKey('N')}). Give it a <b>name</b> ${helpMarker(1)} you will recognize later. Group and tags are optional and help when you have many forwarders. The <b>comment</b> holds free-text notes, such as where the device is or who to ask; it is shown on the detail page and as a ${icon('note')} icon in the list.`],
+      ['Open the dialog', `On the <a href="#/">Forwarders</a> page click <b>New forwarder</b> (or press ${helpKey('N')}). Give it a <b>name</b> ${helpMarker(1)} you will recognize later. Tags are optional and help when you have many forwarders. The <b>comment</b> holds free-text notes, such as where the device is or who to ask; it is shown on the detail page and as a ${icon('note')} icon in the list.`],
       ['Choose the data format', `${helpMarker(2)} Keep <b>NMEA / text lines</b> for NMEA and any other line-based text. Choose <b>Raw byte stream</b> only for binary data. ${helpLink('framing', 'Why this matters')}`],
       ['Set up the input', `${helpMarker(3)} Mode <b>UDP listen</b>, port <code>10110</code>. Keep <i>Bind address</i> at <b>All interfaces</b> to receive on every network; the dropdown also lists each IP address of the Delta machine.`],
       ['Set up the output', `${helpMarker(4)} Mode <b>TCP server</b> (tcp-listen), port <code>10111</code>. Optionally limit the number of clients. Use ${helpMarker(5)} <b>Add output</b> to send the same data to more places, for example a plotter.`],
@@ -544,9 +550,9 @@ const HELP_SECTIONS = [
       <b>Forwarders</b> in the sidebar counts the ones with a problem.</p>
     ${helpFigure(helpListMockup(), 'The forwarder list. Green dot: everything works. Orange: running, but an endpoint is not (fully) connected. Red: could not start. Grey: stopped.', true)}
     ${helpSteps([
-      ['Search', `Finds names, groups, tags, comments, modes and addresses. Press ${helpKey('/')} to jump into the search field.`],
-      ['Filter', '<b>Issues</b> shows only forwarders that failed, have a disconnected endpoint or a firing alert. Click a tag chip to filter by that tag; tick <b>Group</b> to show the list in sections.'],
-      ['Select', 'Tick the boxes to get a bar with bulk actions: start, stop, restart, tag, group, export, delete.'],
+      ['Search', `Finds names, tags, comments, modes and addresses. Press ${helpKey('/')} to jump into the search field.`],
+      ['Filter', '<b>Issues</b> shows only forwarders that failed, have a disconnected endpoint or a firing alert. Click a tag chip to filter by that tag.'],
+      ['Select', 'Tick the boxes to get a bar with bulk actions: start, stop, restart, tag, export, delete.'],
       ['Act', 'The square button stops a running forwarder (or one that failed to start and keeps retrying), the triangle starts a stopped one. <b>⋯</b> opens edit, duplicate, export and delete. Click the name for the detail page.'],
     ])}
     <p>Click a column header to sort by it (Name, Traffic in, Msg/s, Clients in/out, Drops); click again to reverse. Numbers sort largest first.
@@ -563,7 +569,7 @@ const HELP_SECTIONS = [
     ])}
     <h3>Other pages</h3>
     <ul>
-      <li><a href="#/events">Events</a>: one log of everything: starts, stops, connects, disconnects, errors and alerts. Filter by level (<span class="pill info">info</span> normal, <span class="pill warn">warn</span> Delta handles it itself, <span class="pill error">error</span> needs attention) or search. The newest 5000 events are shown. Every event is also appended to the event log file (one JSON object per line, rotated at a set size; see <a href="#/settings">Settings</a>), loaded again after a restart, and written to Delta's own output (e.g. the systemd journal).</li>
+      <li><a href="#/events">Events</a>: one log of everything: starts, stops, connects, disconnects, errors and alerts. Filter by level (<span class="pill info">info</span> normal, <span class="pill warn">warn</span> Delta handles it itself, <span class="pill error">error</span> needs attention) or search. The newest 5000 events are shown. Every event is also appended to the event log file (one syslog-style text line per event, rotated at a set size; see <a href="#/settings">Settings</a>), loaded again after a restart, and written to Delta's own output (e.g. the systemd journal).</li>
       <li><a href="#/captures">Captures</a>: all recordings, uploads and running replays.</li>
       <li><a href="#/settings">Settings</a>: alerts, event log file, password, backup, and where the config file is.</li>
     </ul>
@@ -690,11 +696,10 @@ const HELP_SECTIONS = [
     ${helpNote('info', 'Firing alerts also appear as a red badge in the forwarder list, as a banner on the detail page and in the Events log, even without a webhook.')}`],
 
   ['organize', 'Tutorial: organize many forwarders', 'tag', 'Tutorials', () => `
-    <p>With dozens of forwarders, tags, groups and bulk actions keep the list manageable.</p>
+    <p>With dozens of forwarders, tags and bulk actions keep the list manageable.</p>
     ${helpSteps([
       ['Tags', 'Keywords such as <code>gps</code>, <code>ais</code>, <code>test</code>. A forwarder can have several. Click a tag chip in the list (or use the tag dropdown) to show only forwarders with that tag.'],
-      ['Groups', 'Each forwarder can be in one group, for example by location (<i>Bridge</i>, <i>Engine room</i>). Tick <b>Group</b> above the list to show it in sections.'],
-      ['Bulk actions', 'Tick several forwarders (or the box in the header for all shown ones). The dark bar that appears starts, stops, restarts, tags, groups, exports or deletes them all at once. To remove a tag from all selected, enter it with a leading minus, e.g. <code>-test</code>; to take them out of their group, leave the group name empty.'],
+      ['Bulk actions', 'Tick several forwarders (or the box in the header for all shown ones). The dark bar that appears starts, stops, restarts, tags, exports or deletes them all at once. To remove a tag from all selected, enter it with a leading minus, e.g. <code>-test</code>.'],
       ['Duplicate', '<b>⋯ → Duplicate</b> opens the editor with a copy named “… copy”; change the name and the listen ports (two forwarders cannot listen on the same port) and save.'],
       ['Export and import', '<b>Export</b> downloads forwarders as JSON (all, a selection, or one). <b>Import</b> adds the forwarders from such a file as new, stopped forwarders, so nothing starts by surprise and nothing is overwritten.'],
     ])}
@@ -809,7 +814,8 @@ const HELP_SECTIONS = [
   "forwarders": [ … ]
 }`)}
     <h3>Event log file</h3>
-    <p>Every event is appended to <code>event_log</code> (default <code>delta-events.log</code>, relative to the config file), one JSON object per line.
+    <p>Every event is appended to <code>event_log</code> (default <code>delta-events.log</code>, relative to the config file), one line per event in a syslog-style format
+      (<code>2026-10-30T20:37:41.112+01:00 myhost delta[1234]: ERROR [f3a9c2e17b04] GPS bridge: connection refused</code>), so you can read it with <code>less</code>, <code>grep</code> or <code>tail -f</code>.
       When it reaches <code>event_log_max_mb</code> it is renamed to <code>&lt;file&gt;.1</code> and a new file is started, so the log never uses more than twice that size.
       At startup the newest 5000 events are loaded from both files. Set <code>event_log</code> to <code>off</code> to keep events in memory only.
       Both can be changed under <a href="#/settings">Settings → Event log</a> while Delta runs.</p>
@@ -847,7 +853,7 @@ curl -u :PASSWORD -X POST 'http://${location.host}/api/forwarders?start=1' \\
           <code>capture-start</code> with <code>{"max_seconds": 0, "max_mb": 0}</code> (0 = no limit)</td></tr>
         <tr><td><code>GET /api/forwarders/{id}/history</code></td><td>Throughput of the last 10 minutes</td></tr>
         <tr><td><code>GET /api/forwarders/{id}/inspect</code></td><td>Live messages (server-sent events)</td></tr>
-        <tr><td><code>POST /api/bulk</code></td><td>One action for several forwarders: <code>{"ids": […], "action": "start|stop|restart|delete|tag|untag|group", "value": "…"}</code></td></tr>
+        <tr><td><code>POST /api/bulk</code></td><td>One action for several forwarders: <code>{"ids": […], "action": "start|stop|restart|delete|tag|untag", "value": "…"}</code></td></tr>
         <tr><td><code>GET /api/stream</code></td><td>Live state of all forwarders and new events (server-sent events)</td></tr>
         <tr><td><code>GET /api/events</code></td><td>Event log, newest first (<code>?forwarder=&lt;id&gt;</code>, <code>?limit=</code>)</td></tr>
         <tr><td><code>GET /api/interfaces</code></td><td>IP addresses of the Delta machine (bind address choices)</td></tr>

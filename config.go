@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -61,9 +62,11 @@ type AlertConfig struct {
 // ForwarderConfig describes one forwarder: an input (which may receive from
 // several senders at once) whose data is copied to all outputs.
 type ForwarderConfig struct {
-	ID               string           `json:"id"`
-	Name             string           `json:"name"`
-	Group            string           `json:"group,omitempty"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// LegacyGroup only exists so that config files and backups from versions
+	// with forwarder groups still load. The value is dropped by normalize.
+	LegacyGroup      string           `json:"group,omitempty"`
 	Tags             []string         `json:"tags"`
 	Comment          string           `json:"comment,omitempty"`    // free-text notes, shown in the UI only
 	Framing          string           `json:"framing"`              // "raw" (bytes as they arrive) or "lines" (one message per line, e.g. NMEA)
@@ -192,7 +195,7 @@ const maxCommentLength = 4000
 // and fills in the ID and creation time if they are missing.
 func (fc *ForwarderConfig) normalize() error {
 	fc.Name = strings.TrimSpace(fc.Name)
-	fc.Group = strings.TrimSpace(fc.Group)
+	fc.LegacyGroup = "" // groups were removed; see LegacyGroup
 	fc.Comment = strings.TrimSpace(fc.Comment)
 	if fc.Name == "" {
 		return errors.New("name is required")
@@ -364,4 +367,40 @@ func randomHex(n int) string {
 	b := make([]byte, n)
 	rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// resolveNextToConfig resolves a relative path (data_dir, event_log)
+// against the directory of the config file.
+func resolveNextToConfig(configPath, path string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(filepath.Dir(configPath), path)
+}
+
+// validateInitialSetup checks and trims the settings entered on the first-start page.
+func validateInitialSetup(setup *InitialSetup) error {
+	setup.Bind = strings.TrimSpace(setup.Bind)
+	setup.DataDir = strings.TrimSpace(setup.DataDir)
+	setup.WebhookURL = strings.TrimSpace(setup.WebhookURL)
+	setup.EventLog = strings.TrimSpace(setup.EventLog)
+	if setup.Port < 0 || setup.Port > 65535 {
+		return errors.New("web port must be between 1 and 65535")
+	}
+	if setup.Bind != "" && net.ParseIP(setup.Bind) == nil {
+		return fmt.Errorf("bind address %q is not an IP address (leave it empty for all interfaces)", setup.Bind)
+	}
+	if setup.SessionHours < 0 || setup.SessionHours > 24*365 {
+		return errors.New("login duration must be between 1 hour and 1 year")
+	}
+	if setup.DownAfterSeconds < 0 || setup.EventLogMaxMB < 0 {
+		return errors.New("negative numbers are not allowed")
+	}
+	if setup.WebhookURL != "" {
+		parsed, err := url.Parse(setup.WebhookURL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			return fmt.Errorf("webhook URL %q must start with http:// or https://", setup.WebhookURL)
+		}
+	}
+	return nil
 }

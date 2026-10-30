@@ -3,7 +3,9 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 // Events survive a restart: they are appended to the log file and loaded
@@ -75,5 +77,31 @@ func TestResolveEventLogPath(t *testing.T) {
 		if got := resolveEventLogPath("/etc/delta/delta.json", configured); got != want {
 			t.Errorf("resolveEventLogPath(%q) = %q, want %q", configured, got, want)
 		}
+	}
+}
+
+// A line written to the file reads back as the same event, also for
+// messages with colons and line breaks.
+func TestEventLogLineFormat(t *testing.T) {
+	when := time.Date(2026, 10, 30, 20, 37, 41, 112_000_000, time.Local)
+	events := []Event{
+		{Time: when, Level: "info", Message: "Delta 1.3.0 started"},
+		{Time: when, Level: "error", ForwarderID: "f3a9c2e17b04", ForwarderName: "GPS bridge", Message: "connect 10.0.0.5:4001: connection refused"},
+		{Time: when, Level: "warn", ForwarderID: "f000000000aa", ForwarderName: "AIS [deck]", Message: "two\nlines"},
+	}
+	for _, want := range events {
+		line := formatLogLine(want)
+		if !strings.HasSuffix(line, "\n") || strings.Count(line, "\n") != 1 {
+			t.Fatalf("not exactly one line: %q", line)
+		}
+		got, ok := parseLogLine(strings.TrimSuffix(line, "\n"))
+		want.Message = strings.ReplaceAll(want.Message, "\n", " ")
+		if !ok || !got.Time.Equal(want.Time) || got.Level != want.Level || got.ForwarderID != want.ForwarderID ||
+			got.ForwarderName != want.ForwarderName || got.Message != want.Message {
+			t.Errorf("line %q read back as %+v, want %+v", line, got, want)
+		}
+	}
+	if _, ok := parseLogLine(`{"id":1,"msg":"json from an older build"}`); ok {
+		t.Error("a line in another format was accepted")
 	}
 }

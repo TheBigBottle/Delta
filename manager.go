@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -104,10 +103,7 @@ type Manager struct {
 }
 
 func newManager(configPath string, config *Config) *Manager {
-	dataDir := config.DataDir
-	if !filepath.IsAbs(dataDir) {
-		dataDir = filepath.Join(filepath.Dir(configPath), dataDir)
-	}
+	dataDir := resolveNextToConfig(configPath, config.DataDir)
 	bus := &EventBus{subscribers: map[chan []byte]struct{}{}}
 	m := &Manager{
 		configPath: configPath, config: config, dataDir: dataDir,
@@ -348,9 +344,8 @@ func (m *Manager) SetRunning(action string, ids ...string) error {
 	return errors.Join(startErrors...)
 }
 
-// UpdateTagsOrGroup adds a tag ("tag"), removes a tag ("untag") or sets the
-// group ("group") of several forwarders at once.
-func (m *Manager) UpdateTagsOrGroup(action, value string, ids ...string) error {
+// UpdateTags adds a tag ("tag") to or removes a tag ("untag") from several forwarders at once.
+func (m *Manager) UpdateTags(action, value string, ids ...string) error {
 	m.mu.Lock()
 	defer m.BroadcastForwarders() // runs after the unlock below (defers run in reverse order)
 	defer m.mu.Unlock()
@@ -367,8 +362,6 @@ func (m *Manager) UpdateTagsOrGroup(action, value string, ids ...string) error {
 			}
 		case "untag":
 			fc.Tags = slices.DeleteFunc(fc.Tags, func(tag string) bool { return tag == value })
-		case "group":
-			fc.Group = value
 		}
 	}
 	m.saveLocked()
@@ -674,24 +667,101 @@ func (m *Manager) PasswordHash() string {
 // NeedsPasswordSetup is true until the first password has been set.
 func (m *Manager) NeedsPasswordSetup() bool { return m.PasswordHash() == "" }
 
-// SetInitialPassword sets the password on first start. It fails if a
-// password already exists, so the setup page cannot be used to take over.
-func (m *Manager) SetInitialPassword(password string) error {
-	if err := checkNewPassword(password); err != nil {
-		return err
+// InitialSetup is the request body of POST /api/setup: the password and the
+// first settings, entered on the first-start page. Empty or zero fields keep
+// the value from the config file (or its default).
+type InitialSetup struct {
+	Password         string `json:"password"`
+	Port             int    `json:"port"`
+	Bind             string `json:"bind"`
+	DataDir          string `json:"data_dir"`
+	SessionHours     int    `json:"session_hours"`
+	WebhookURL       string `json:"webhook_url"`
+	DownAfterSeconds int    `json:"down_after"`
+	EventLog         string `json:"event_log"`
+	EventLogMaxMB    int    `json:"event_log_max_mb"`
+}
+
+// SetupDefaults returns the values the first-start page is filled with.
+func (m *Manager) SetupDefaults() map[string]any {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return map[string]any{
+		"port": m.config.Port, "bind": m.config.Bind, "data_dir": m.config.DataDir,
+		"session_hours": m.config.SessionHours, "webhook_url": m.config.Alerts.WebhookURL,
+		"down_after": m.config.Alerts.DownAfterSeconds, "event_log": m.config.EventLog,
+		"event_log_max_mb": m.config.EventLogMaxMB, "config_path": m.configPath, "web_addr": m.webAddress,
 	}
-	hash, err := hashPassword(password) // slow on purpose; done before taking the lock
+}
+
+// CompleteSetup sets the password and the first settings on first start.
+// It fails if a password already exists, so the setup page cannot be used
+// to take over. Everything is checked first: either all of it is saved or
+// nothing. restartNeeded is true when the web port or bind address changed,
+// because the web interface keeps its current address until Delta restarts.
+func (m *Manager) CompleteSetup(setup InitialSetup) (restartNeeded bool, err error) {
+	if err := checkNewPassword(setup.Password); err != nil {
+		return false, err
+	}
+	if err := validateInitialSetup(&setup); err != nil {
+		return false, err
+	}
+	hash, err := hashPassword(setup.Password) // slow on purpose; done before taking the lock
 	if err != nil {
-		return err
+		return false, err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.config.PasswordHash != "" {
-		return errors.New("a password is already set")
+		return false, errors.New("a password is already set")
+	}
+	if setup.EventLog != "" || setup.EventLogMaxMB > 0 {
+		if err := m.switchEventLogLocked(setup.EventLog, setup.EventLogMaxMB); err != nil {
+			return false, err
+		}
 	}
 	m.config.PasswordHash = hash
+	if setup.Port != 0 && setup.Port != m.config.Port {
+		m.config.Port, restartNeeded = setup.Port, true
+	}
+	if setup.Bind != m.config.Bind {
+		m.config.Bind, restartNeeded = setup.Bind, true
+	}
+	if setup.DataDir != "" {
+		// Safe without further locking: until the password is set, every API
+		// request is refused, so no capture can be using the old directory.
+		m.config.DataDir, m.dataDir = setup.DataDir, resolveNextToConfig(m.configPath, setup.DataDir)
+	}
+	if setup.SessionHours > 0 {
+		m.config.SessionHours = setup.SessionHours
+	}
+	m.config.Alerts.WebhookURL = setup.WebhookURL
+	if setup.DownAfterSeconds > 0 {
+		m.config.Alerts.DownAfterSeconds = setup.DownAfterSeconds
+	}
 	m.saveLocked()
-	m.events.Add("info", "", "", "initial password set")
+	m.events.Add("info", "", "", "first-start setup completed")
+	return restartNeeded, nil
+}
+
+// switchEventLogLocked changes the event log file and its rotation size
+// (empty / 0 = keep the current value). The new file is opened first; if
+// that fails nothing is changed. m.mu must be held.
+func (m *Manager) switchEventLogLocked(configured string, maxMB int) error {
+	if configured = strings.TrimSpace(configured); configured == "" {
+		configured = m.config.EventLog
+	}
+	if maxMB <= 0 {
+		maxMB = m.config.EventLogMaxMB
+	}
+	path := resolveEventLogPath(m.configPath, configured)
+	if err := m.events.OpenFile(path, int64(maxMB)<<20); err != nil {
+		return err
+	}
+	if configured != m.config.EventLog {
+		m.events.Add("info", "", "", "event log file: "+cmp.Or(path, "off (memory only)"))
+	}
+	m.config.EventLog, m.config.EventLogMaxMB = configured, maxMB
 	return nil
 }
 
@@ -731,24 +801,14 @@ func (m *Manager) UpdateSettings(update SettingsUpdate) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if update.EventLog != nil || update.EventLogMaxMB > 0 {
-		configured, maxMB := m.config.EventLog, m.config.EventLogMaxMB
+		configured := ""
 		if update.EventLog != nil {
-			if configured = strings.TrimSpace(*update.EventLog); configured == "" {
-				configured = defaultEventLog
-			}
+			// An emptied field means "back to the default file".
+			configured = cmp.Or(strings.TrimSpace(*update.EventLog), defaultEventLog)
 		}
-		if update.EventLogMaxMB > 0 {
-			maxMB = update.EventLogMaxMB
-		}
-		// Open the new file first: if that fails, nothing is changed.
-		path := resolveEventLogPath(m.configPath, configured)
-		if err := m.events.OpenFile(path, int64(maxMB)<<20); err != nil {
+		if err := m.switchEventLogLocked(configured, update.EventLogMaxMB); err != nil {
 			return err
 		}
-		if configured != m.config.EventLog {
-			m.events.Add("info", "", "", "event log file: "+cmp.Or(path, "off (memory only)"))
-		}
-		m.config.EventLog, m.config.EventLogMaxMB = configured, maxMB
 	}
 	if newHash != "" {
 		m.config.PasswordHash = newHash

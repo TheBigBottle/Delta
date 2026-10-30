@@ -163,7 +163,6 @@ const ENDPOINT_MODES = {
     ['tcp-listen', 'TCP server — sources connect to Delta'],
     ['udp-listen', 'UDP listen — receive datagrams on a port'],
     ['tcp-connect', 'TCP client — Delta connects to a source'],
-    ['udp-connect', 'UDP client — Delta registers at a remote host'],
   ],
   output: [
     ['tcp-listen', 'TCP server — clients connect and receive data'],
@@ -171,7 +170,7 @@ const ENDPOINT_MODES = {
     ['udp-send', 'UDP send — datagrams to a remote host'],
   ],
 };
-const MODE_LABELS = { 'tcp-listen': 'TCP listen', 'udp-listen': 'UDP listen', 'tcp-connect': 'TCP connect', 'udp-connect': 'UDP connect', 'udp-send': 'UDP send' };
+const MODE_LABELS = { 'tcp-listen': 'TCP listen', 'udp-listen': 'UDP listen', 'tcp-connect': 'TCP connect', 'udp-send': 'UDP send' };
 const isListenMode = mode => mode.endsWith('-listen');
 // Listen endpoints show "*:port" when they listen on all interfaces.
 const endpointAddress = endpoint => `${isListenMode(endpoint.mode) ? (endpoint.host || '*') : endpoint.host}:${endpoint.port}`;
@@ -210,7 +209,6 @@ const MODE_HINTS = {
   'tcp-listen': 'TCP server: Delta opens this port and others connect to it',
   'udp-listen': 'UDP: Delta receives datagrams on this port from any sender',
   'tcp-connect': 'TCP client: Delta connects to this remote host and port',
-  'udp-connect': 'UDP client: Delta registers at this remote host and receives its datagrams',
   'udp-send': 'UDP: Delta sends every message as a datagram to this host and port',
 };
 const HEALTH_SORT_ORDER = { error: 0, degraded: 1, ok: 2, stopped: 3 };
@@ -1342,11 +1340,6 @@ function endpointFormFields(endpoint, path, direction) {
     additionalHostsHtml = `${rows}
       <div class="row"><button type="button" class="btn sm" data-add-target="${path}" title="Add another remote host. ${hint}">${icon('plus')}Add host</button>
         <span class="hint muted" style="font-size:12px">${hint}.</span></div>`;
-  }
-  if (endpoint.mode === 'udp-connect') {
-    modeSpecificFields += `
-      <label class="f">Hello message<input data-path="${path}.hello" value="${escapeHtml(endpoint.hello || '')}" placeholder="e.g. HELLO\\r\\n"><span class="hint">Sent to register at the remote. Escapes: \\r \\n \\xHH</span></label>
-      <label class="f">Hello interval (s)<input type="number" min="0" data-path="${path}.hello_interval" value="${endpoint.hello_interval || ''}" placeholder="30"></label>`;
   }
 
   return `
@@ -2687,8 +2680,7 @@ function renderCapturesPage(main) {
 function renderConfigTab(container, forwarderId) {
   function render() {
     const config = configOf(state.forwardersById.get(forwarderId));
-    const inputExtras = (config.input.max_clients ? ` (max ${config.input.max_clients} clients)` : '')
-      + (config.input.hello ? ` · hello "${escapeHtml(config.input.hello)}" every ${config.input.hello_interval || 30}s` : '');
+    const inputExtras = config.input.max_clients ? ` (max ${config.input.max_clients} clients)` : '';
     const outputRows = config.outputs.map((out, i) => {
       const extras = (out.max_clients ? ` (max ${out.max_clients} clients)` : '') + (out.queue ? ` · queue ${out.queue}` : '');
       return `<dt>Output ${i + 1}</dt><dd>${out.name ? escapeHtml(out.name) + ': ' : ''}${MODE_LABELS[out.mode]} ${escapeHtml(allEndpointAddresses(out).join(', '))}${extras}</dd>`;

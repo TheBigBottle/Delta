@@ -160,7 +160,6 @@ Forwarders without an `id` get one automatically.
 | `tcp-listen` | Any number of sources connect to Delta (up to `max_clients`); their data is merged | Clients connect and receive the data (`max_clients`, `queue` per client) |
 | `tcp-connect` | Delta connects to a source and reconnects automatically. More sources in `targets` are merged | Delta connects to a target, reconnects, and buffers up to `queue` messages while it is down. More targets in `targets` each get a copy and their own buffer |
 | `udp-listen` | Receive datagrams on a port, from any sender | — |
-| `udp-connect` | Delta registers at a remote host, optionally sending a `hello` datagram every `hello_interval` s | — |
 | `udp-send` | — | Send datagrams to a host |
 
 `targets` (tcp-connect only) lists more remote hosts besides `host`/`port`, e.g. `"targets": [{"host": "10.0.0.6", "port": 4001}]`. Delta keeps one connection to each; while only some are connected the endpoint state is `partial`.

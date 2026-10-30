@@ -474,8 +474,6 @@ func Start(forwarderConfig config.ForwarderConfig, logEvent func(level, message 
 		for _, connection := range fw.input.connections { // one connection loop per remote host
 			workerFuncs = append(workerFuncs, func() { fw.runTCPConnectInput(connection) })
 		}
-	case "udp-connect":
-		workerFuncs = append(workerFuncs, fw.runUDPConnectInput)
 	}
 
 	for i, outputConfig := range forwarderConfig.Outputs {
@@ -795,94 +793,6 @@ func (fw *Forwarder) runUDPListenInput(udpConn *net.UDPConn) {
 		}
 	}
 }
-
-// runUDPConnectInput receives datagrams from one remote host. UDP has no
-// handshake, so a configurable "hello" datagram tells the remote where to send.
-func (fw *Forwarder) runUDPConnectInput() {
-	input := fw.input
-	dialer := net.Dialer{Timeout: dialTimeout}
-	var retry retryDelay
-	for fw.ctx.Err() == nil {
-		input.setState("connecting")
-		conn, err := dialer.DialContext(fw.ctx, "udp", input.config.Address())
-		if err != nil {
-			if fw.ctx.Err() != nil {
-				return
-			}
-			input.setStateWithError("down", err) // e.g. the host name cannot be resolved
-			sleepOrCancel(fw.ctx, retry.next())
-			continue
-		}
-		retry.reset()
-		err = fw.receiveUDPSession(conn.(*net.UDPConn))
-		conn.Close()
-		if fw.ctx.Err() != nil {
-			return
-		}
-		input.reconnectCount.Add(1)
-		input.setStateWithError("down", err)
-		sleepOrCancel(fw.ctx, retry.next())
-	}
-}
-
-// receiveUDPSession sends the hello datagrams and reads from a connected UDP
-// socket until a fatal error occurs.
-func (fw *Forwarder) receiveUDPSession(udpConn *net.UDPConn) error {
-	input := fw.input
-	sessionCtx, endSession := context.WithCancel(fw.ctx)
-	defer endSession()
-	defer context.AfterFunc(sessionCtx, func() { udpConn.Close() })()
-	udpConn.SetReadBuffer(socketBufferSize)
-	peer := input.addPeer(udpConn.RemoteAddr().String(), udpConn)
-	defer input.removePeer(peer)
-
-	if hello := unescapeHello(input.config.Hello); len(hello) > 0 {
-		interval := time.Duration(input.config.HelloIntervalSeconds) * time.Second
-		if interval <= 0 {
-			interval = 30 * time.Second
-		}
-		fw.runConnection(func() {
-			for {
-				udpConn.Write(hello) // send errors show up on the read side
-				if !sleepOrCancel(sessionCtx, interval) {
-					return
-				}
-			}
-		})
-	}
-
-	state := "open"
-	input.setState(state)
-	lineFramer := framer{splitLines: fw.config.Framing == "lines"}
-	readBuffer := make([]byte, udpReadBufferSize)
-	for {
-		n, err := udpConn.Read(readBuffer)
-		if err != nil {
-			// "Port unreachable" (ICMP) does not break the socket: keep waiting,
-			// the remote service may come back.
-			if errors.Is(err, syscall.ECONNREFUSED) {
-				if state != "unreachable" {
-					fw.logEvent("warn", "input: "+input.config.Address()+" port unreachable")
-					state = "unreachable"
-				}
-				input.setStateWithError(state, err)
-				if !sleepOrCancel(sessionCtx, time.Second) {
-					return nil
-				}
-				continue
-			}
-			return err
-		}
-		if state != "receiving" {
-			state = "receiving"
-			input.setState(state)
-		}
-		peer.countBytes(n)
-		lineFramer.feedDatagram(readBuffer[:n], peer.Remote, fw.Dispatch)
-	}
-}
-
-// ---- outputs ----
 
 // writeQueueToConn sends queued messages to a TCP connection until the
 // connection fails or the forwarder stops. Messages that are already waiting
@@ -1221,40 +1131,4 @@ func sleepOrCancel(ctx context.Context, d time.Duration) bool {
 	case <-timer.C:
 		return true
 	}
-}
-
-// unescapeHello converts the escapes \r \n \t \\ and \xHH in a hello message,
-// so binary hello datagrams can be entered as text in the web interface.
-func unescapeHello(text string) []byte {
-	var out []byte
-	for i := 0; i < len(text); i++ {
-		c := text[i]
-		if c != '\\' || i+1 >= len(text) {
-			out = append(out, c)
-			continue
-		}
-		i++
-		switch text[i] {
-		case 'n':
-			out = append(out, '\n')
-		case 'r':
-			out = append(out, '\r')
-		case 't':
-			out = append(out, '\t')
-		case '\\':
-			out = append(out, '\\')
-		case 'x':
-			if i+2 < len(text) {
-				if value, err := strconv.ParseUint(text[i+1:i+3], 16, 8); err == nil {
-					out = append(out, byte(value))
-					i += 2
-					continue
-				}
-			}
-			out = append(out, '\\', 'x')
-		default:
-			out = append(out, '\\', text[i])
-		}
-	}
-	return out
 }

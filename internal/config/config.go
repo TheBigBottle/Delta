@@ -81,14 +81,17 @@ type ForwarderConfig struct {
 
 // EndpointConfig describes the input or one output of a forwarder.
 type EndpointConfig struct {
-	Name                 string `json:"name,omitempty"` // optional label shown in the UI
-	Mode                 string `json:"mode"`           // see inputModes / outputModes
-	Host                 string `json:"host,omitempty"` // remote host, or the local bind address for listen modes
-	Port                 int    `json:"port"`
-	MaxClients           int    `json:"max_clients,omitempty"`    // tcp-listen only, 0 = unlimited
-	QueueSize            int    `json:"queue,omitempty"`          // outputs: buffered messages (per client for tcp-listen), 0 = default
-	Hello                string `json:"hello,omitempty"`          // udp-connect input: datagram that announces us to the remote host
-	HelloIntervalSeconds int    `json:"hello_interval,omitempty"` // udp-connect input: how often the hello is repeated
+	Name       string `json:"name,omitempty"` // optional label shown in the UI
+	Mode       string `json:"mode"`           // see inputModes / outputModes
+	Host       string `json:"host,omitempty"` // remote host, or the local bind address for listen modes
+	Port       int    `json:"port"`
+	MaxClients int    `json:"max_clients,omitempty"` // tcp-listen only, 0 = unlimited
+	QueueSize  int    `json:"queue,omitempty"`       // outputs: buffered messages (per client for tcp-listen), 0 = default
+	// The udp-connect input mode was removed in 1.5.0. Its two settings are
+	// still accepted when reading, so an old file gets the clear "mode was
+	// removed" error from validate instead of "unknown field". Never written.
+	LegacyHello         string `json:"hello,omitempty"`
+	LegacyHelloInterval int    `json:"hello_interval,omitempty"`
 	// tcp-connect only: more remote hosts besides Host:Port. Delta keeps one
 	// connection to each; an input merges their data, an output sends a copy to each.
 	Targets []RemoteTarget `json:"targets,omitempty"`
@@ -106,7 +109,7 @@ const maxConnectTargets = 64
 // The modes an endpoint can have. "listen" modes open a local port,
 // "connect"/"send" modes reach out to a remote host.
 var (
-	inputModes  = map[string]bool{"tcp-listen": true, "tcp-connect": true, "udp-listen": true, "udp-connect": true}
+	inputModes  = map[string]bool{"tcp-listen": true, "tcp-connect": true, "udp-listen": true}
 	outputModes = map[string]bool{"tcp-listen": true, "tcp-connect": true, "udp-send": true}
 )
 
@@ -143,23 +146,24 @@ func (ep *EndpointConfig) validate(isInput bool) error {
 	if isInput {
 		allowedModes = inputModes
 	}
+	if ep.Mode == "udp-connect" {
+		return errors.New(`mode "udp-connect" is no longer supported (removed in Delta 1.5.0); use udp-listen or tcp-connect instead`)
+	}
 	if !allowedModes[ep.Mode] {
 		return fmt.Errorf("unknown mode %q", ep.Mode)
 	}
+	ep.LegacyHello, ep.LegacyHelloInterval = "", 0
 	if ep.Port < 1 || ep.Port > 65535 {
 		return errors.New("port must be 1-65535")
 	}
 	if !ep.isListener() && ep.Host == "" {
 		return fmt.Errorf("host is required for mode %s", ep.Mode)
 	}
-	if ep.MaxClients < 0 || ep.QueueSize < 0 || ep.QueueSize > 1_000_000 || ep.HelloIntervalSeconds < 0 {
+	if ep.MaxClients < 0 || ep.QueueSize < 0 || ep.QueueSize > 1_000_000 {
 		return errors.New("invalid limits")
 	}
 	if ep.Mode != "tcp-listen" {
 		ep.MaxClients = 0
-	}
-	if ep.Mode != "udp-connect" {
-		ep.Hello, ep.HelloIntervalSeconds = "", 0
 	}
 	if isInput {
 		ep.QueueSize = 0 // inputs have no queue

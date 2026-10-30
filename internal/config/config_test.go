@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -36,5 +37,19 @@ func TestConnectTargetsValidation(t *testing.T) {
 	listener := EndpointConfig{Mode: "tcp-listen", Port: 4001, Targets: []RemoteTarget{{Host: "x", Port: 1}}}
 	if err := listener.validate(true); err != nil || listener.Targets != nil {
 		t.Fatalf("targets of a listen endpoint were not cleared: %v %+v", err, listener.Targets)
+	}
+}
+
+// The removed udp-connect mode gives a clear error, also for old files that
+// still contain its hello settings.
+func TestRemovedUDPConnectMode(t *testing.T) {
+	path := t.TempDir() + "/delta.json"
+	old := `{"forwarders":[{"name":"old","framing":"lines","input":{"mode":"udp-connect","host":"ais.example.org","port":5631,"hello":"HELLO","hello_interval":30},"outputs":[{"mode":"tcp-listen","port":10112}]}]}`
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "no longer supported") {
+		t.Fatalf("error = %v, want the removed-mode message", err)
 	}
 }

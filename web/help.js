@@ -600,19 +600,15 @@ const HELP_SECTIONS = [
         'Devices connect to Delta and send their data; Delta sends every sentence as a UDP datagram to a host in another network (for example over a VPN).',
         { mode: 'tcp-listen', host: '', port: 5000, label: 'Devices connect', max_clients: 5 },
         [{ mode: 'udp-send', host: '10.8.0.1', port: 10110, label: 'Remote' }]],
-      ['Subscribe to a UDP service',
-        'Some servers only send UDP to clients that registered with a “hello” datagram. Delta sends it at start and repeats it, so the server keeps sending.',
-        { mode: 'udp-connect', host: 'ais.example.org', port: 5631, hello: 'HELLO\\r\\n', hello_interval: 30, label: 'AIS service' },
-        [{ mode: 'tcp-listen', host: '', port: 10112, label: 'Apps connect here' }]],
     ];
-    return `<p>Five typical ways to use Delta. Each one shows the setup and the JSON you could put in the config file or send to the
+    return `<p>Four typical ways to use Delta. Each one shows the setup and the JSON you could put in the config file or send to the
       ${helpLink('api', 'REST API')}. In the editor, pick the same modes and ports.</p>
       ${recipes.map(([title, text, input, outputs], index) => `
         <h3>${index + 1}. ${title}</h3>
         <p>${text}</p>
         ${helpFigure(helpMiniFlow(input, outputs), '')}
         <details class="help-details"><summary title="Show the configuration of this setup as JSON">Show as JSON</summary>${helpCode(helpForwarderJson(title, input, outputs))}</details>`).join('')}
-      <h3>5. Several TCP sources or targets in one forwarder</h3>
+      <h3>${recipes.length + 1}. Several TCP sources or targets in one forwarder</h3>
       <p>In <b>TCP client</b> mode the editor has an <b>Add host</b> button below the host field. For an input, Delta connects to every
         listed host and merges what they send; for an output, every host gets its own copy. The flow diagram lists each host with its own state.
         If only some hosts are connected, the endpoint shows <span class="pill warn">partial</span> and the forwarder counts as degraded.</p>
@@ -710,7 +706,6 @@ const HELP_SECTIONS = [
       ['tcp-listen', 'TCP server', 'Devices or programs connect to Delta and send their data. Several sources may be connected at once; their data is merged. <i>Max clients</i> limits how many.', { leftTitle: 'Source', leftSub: 'device', rightTitle: 'Delta', rightSub: 'listens :port', connect: 'right', connectLabel: 'source connects', dataLabel: 'data', deltaSide: 'right', dataKind: 'in' }],
       ['tcp-connect', 'TCP client', 'Delta connects to a device that offers its data as a TCP server (most NMEA multiplexers and WiFi gateways). Reconnects automatically. With <b>Add host</b> Delta connects to several sources at once and merges their data, e.g. a GPS and an AIS receiver.', { leftTitle: 'Source', leftSub: 'TCP server', rightTitle: 'Delta', rightSub: 'connects', connect: 'left', connectLabel: 'Delta connects', dataLabel: 'data', deltaSide: 'right', dataKind: 'in' }],
       ['udp-listen', 'UDP listen', 'Delta receives datagrams on a port, from any sender. There is no connection; this is the usual way for gateways that broadcast NMEA.', { leftTitle: 'Source', leftSub: 'sends datagrams', rightTitle: 'Delta', rightSub: 'listens :port', connect: 'none', connectLabel: 'no connection', dataLabel: 'datagrams', deltaSide: 'right', dataKind: 'in' }],
-      ['udp-connect', 'UDP client', 'For UDP services that only send to registered clients: Delta sends a <i>hello</i> datagram (escapes <code>\\r \\n \\xHH</code> allowed) and repeats it every <i>hello interval</i> seconds (default 30).', { leftTitle: 'Server', leftSub: 'UDP service', rightTitle: 'Delta', rightSub: 'sends hello', connect: 'left', connectLabel: '“hello” every N s', dataLabel: 'datagrams', deltaSide: 'right', dataKind: 'in' }],
     ];
     const outputModes = [
       ['tcp-listen', 'TCP server', 'Programs connect to Delta and each gets its own copy of the data. <i>Max clients</i> limits how many may connect. Every client has its own queue (default 1024 messages); a stuck client is disconnected after 10 s without progress.', { leftTitle: 'Delta', leftSub: 'listens :port', rightTitle: 'Client', rightSub: 'app, plotter', connect: 'left', connectLabel: 'client connects', dataLabel: 'data', deltaSide: 'left', dataKind: 'out' }],

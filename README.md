@@ -261,10 +261,10 @@ scripts/build.sh    format check, vet, tests, static (cross-)builds
 **Releases** are made locally with the [GitHub CLI](https://cli.github.com/) (`gh auth login` once):
 
 ```bash
-VERSION=1.4.0 scripts/build.sh --all                 # tests + all binaries in dist/
+VERSION=1.5.0 scripts/build.sh --all                 # tests + all binaries in dist/
 (cd dist && sha256sum delta-* > SHA256SUMS)
-git tag -a v1.4.0 -m "Delta 1.4.0" && git push origin v1.4.0
-gh release create v1.4.0 dist/delta-* dist/SHA256SUMS --title "Delta v1.4.0" --generate-notes
+git tag -a v1.5.0 -m "Delta 1.5.0" && git push origin v1.5.0
+gh release create v1.5.0 dist/delta-* dist/SHA256SUMS --title "Delta v1.5.0" --generate-notes
 ```
 
 The web interface uses plain HTTP. If you expose it beyond a trusted network, put it behind a TLS reverse proxy.

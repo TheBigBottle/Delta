@@ -6,8 +6,8 @@ package web
 import "embed"
 
 // Files contains index.html, style.css and the scripts at the top level,
-// help.md (the help page, plain Markdown), and the third-party libraries
+// help.md (the help page, plain Markdown) with its images in help/, and the third-party libraries
 // of the browser side in vendor/ (uPlot for the traffic chart).
 //
-//go:embed index.html style.css *.js help.md vendor
+//go:embed index.html style.css *.js help.md help vendor
 var Files embed.FS

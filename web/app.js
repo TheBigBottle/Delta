@@ -994,13 +994,14 @@ function renderForwarderListPage(main) {
     const problemText = fwd.error || (problem && `${problem.label}: ${problem.reason}`);
     const errorText = problemText ? `<span class="ferr" title="${escapeHtml(problemText)}">${escapeHtml(problemText)}</span>` : '';
     const secondLine = alertPill + recordingPill + tagChips + errorText;
-    // The comment itself is shown in the hover bubble of a small note icon.
-    const commentIcon = fwd.comment ? `<span class="note-icon" title="${escapeHtml(fwd.comment)}">${icon('note')}</span>` : '';
+    // The comment as one quiet line under the name, cut off with "…" when it is
+    // too long (CSS). The hover bubble shows all of it, line breaks included.
+    const commentLine = fwd.comment ? `<div class="fcomment" title="${escapeHtml(fwd.comment)}">${escapeHtml(fwd.comment)}</div>` : '';
     return `<tr data-id="${fwd.id}" class="${isSelected ? 'sel' : ''}">
       <td><input type="checkbox" data-select ${isSelected ? 'checked' : ''} title="Select for bulk actions (start, stop, tag, export, delete …)"></td>
       <td><div class="fname">
         <span class="dot ${healthClass(fwd.health)} ${fwd.health === 'ok' ? 'pulse' : ''}" title="${HEALTH_HINTS[fwd.health]}"></span>
-        <div><a href="#/f/${fwd.id}" title="Open details, live inspector and charts">${escapeHtml(fwd.name)}</a>${commentIcon}${secondLine ? `<div class="tags">${secondLine}</div>` : ''}</div>
+        <div class="fname-text"><a href="#/f/${fwd.id}" title="Open details, live inspector and charts">${escapeHtml(fwd.name)}</a>${commentLine}${secondLine ? `<div class="tags">${secondLine}</div>` : ''}</div>
       </div></td>
       <td class="hide-sm">${endpointBadge(fwd.input, fwd.in_status, isRunning)}</td>
       <td class="hide-sm"><div class="eps">${fwd.outputs.map((out, i) => endpointBadge(out, fwd.out_status?.[i], isRunning)).join('')}</div></td>

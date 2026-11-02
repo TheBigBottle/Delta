@@ -16,7 +16,10 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"golang.org/x/time/rate"
 
 	"delta/internal/config"
 	"delta/internal/engine"
@@ -46,7 +49,11 @@ type Instance struct {
 	alerts       map[string]*alertState // keyed by alert kind: "down", "idle"
 	capture      *captureJob            // active recording, if any
 	replay       *replayJob             // active replay, if any
-	eventLimit   eventRateLimiter
+	// Events of the running forwarder pass this limiter (maxEventsPerSecond,
+	// see eventLoggerFor). It lives here, not in the engine, so it also holds
+	// across restarts of the forwarder. Both are safe without m.mu.
+	eventLimiter     *rate.Limiter
+	suppressedEvents atomic.Int64 // events dropped by eventLimiter since the last one that passed
 }
 
 type Rates struct {
@@ -59,14 +66,6 @@ type alertState struct {
 	conditionSince time.Time // when the alert condition became true; zero while false
 	firing         bool
 	reason         string // latest explanation, shown in the UI while firing
-}
-
-// eventRateLimiter allows maxEventsPerSecond events per second and counts the rest.
-type eventRateLimiter struct {
-	mu         sync.Mutex
-	second     int64 // unix second of the current window
-	count      int
-	suppressed int
 }
 
 // ForwarderStatus is what the API returns for a forwarder: its configuration
@@ -118,7 +117,7 @@ func New(configPath string, cfg *config.Config) *Manager {
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}
 	// Without a usable log file Delta still runs; the events are then kept in memory only.
-	if err := m.Events.OpenFile(resolveEventLogPath(configPath, cfg.EventLog), int64(cfg.EventLogMaxMB)<<20); err != nil {
+	if err := m.Events.OpenFile(resolveEventLogPath(configPath, cfg.EventLog), cfg.EventLogMaxMB); err != nil {
 		m.Events.Add("error", "", "", err.Error()+" (events are kept in memory only)")
 	}
 	for _, fc := range cfg.Forwarders {
@@ -129,7 +128,11 @@ func New(configPath string, cfg *config.Config) *Manager {
 }
 
 func newInstance(fc config.ForwarderConfig) *Instance {
-	return &Instance{config: fc, state: "stopped", stateSince: time.Now(), alerts: map[string]*alertState{}}
+	return &Instance{
+		config: fc, state: "stopped", stateSince: time.Now(), alerts: map[string]*alertState{},
+		// A token bucket: up to maxEventsPerSecond at once, refilled at maxEventsPerSecond per second.
+		eventLimiter: rate.NewLimiter(maxEventsPerSecond, maxEventsPerSecond),
+	}
 }
 
 // saveLocked writes the config file. m.mu must be held.
@@ -156,26 +159,18 @@ func (m *Manager) StartAutostartForwarders() {
 
 // eventLoggerFor returns the function a running forwarder uses to write to
 // the event log. It limits each forwarder to maxEventsPerSecond events, so a
-// client that reconnects in a tight loop cannot flood the log.
+// client that reconnects in a tight loop cannot flood the log. Events over
+// the limit are counted, and the count is logged with the next event that passes.
 func (m *Manager) eventLoggerFor(inst *Instance) func(level, message string) {
 	id, name := inst.config.ID, inst.config.Name
-	limiter := &inst.eventLimit
 	return func(level, message string) {
-		limiter.mu.Lock()
-		now := time.Now().Unix()
-		if now != limiter.second {
-			if limiter.suppressed > 0 {
-				m.Events.Add("warn", id, name, fmt.Sprintf("%d events suppressed", limiter.suppressed))
-			}
-			limiter.second, limiter.count, limiter.suppressed = now, 0, 0
-		}
-		limiter.count++
-		if limiter.count > maxEventsPerSecond {
-			limiter.suppressed++
-			limiter.mu.Unlock()
+		if !inst.eventLimiter.Allow() {
+			inst.suppressedEvents.Add(1)
 			return
 		}
-		limiter.mu.Unlock()
+		if suppressed := inst.suppressedEvents.Swap(0); suppressed > 0 {
+			m.Events.Add("warn", id, name, fmt.Sprintf("%d events suppressed", suppressed))
+		}
 		m.Events.Add(level, id, name, message)
 	}
 }
@@ -746,7 +741,7 @@ func (m *Manager) switchEventLogLocked(configured string, maxMB int) error {
 		maxMB = m.config.EventLogMaxMB
 	}
 	path := resolveEventLogPath(m.configPath, configured)
-	if err := m.Events.OpenFile(path, int64(maxMB)<<20); err != nil {
+	if err := m.Events.OpenFile(path, maxMB); err != nil {
 		return err
 	}
 	if configured != m.config.EventLog {

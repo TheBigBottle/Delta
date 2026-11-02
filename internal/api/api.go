@@ -20,6 +20,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/time/rate"
+
 	"delta/internal/config"
 	"delta/internal/manager"
 	"delta/web"
@@ -61,6 +63,7 @@ func (s *Server) Routes() http.Handler {
 	protected("GET /api/session", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "version": s.manager.Version})
 	})
+	protected("GET /api/help", s.handleHelp) // the help page, rendered from web/help.md
 	protected("GET /api/forwarders", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, s.manager.List())
 	})
@@ -492,9 +495,10 @@ func (s *Server) handleInspect(w http.ResponseWriter, r *http.Request) {
 	const batchesPerSecond = 5
 	batchTicker := time.NewTicker(time.Second / batchesPerSecond)
 	defer batchTicker.Stop()
-	// Two token buckets, refilled every batch interval: one counts messages, one bytes.
-	tokens, refillPerBatch := float64(maxPerSecond), float64(maxPerSecond)/batchesPerSecond
-	byteTokens, byteRefillPerBatch := maxInspectBytesPerSecond, maxInspectBytesPerSecond/batchesPerSecond
+	// Two token buckets: one counts messages, one bytes. Each holds at most one
+	// second's worth, so a quiet phase cannot save up for a flood later.
+	messageLimiter := rate.NewLimiter(rate.Limit(maxPerSecond), maxPerSecond)
+	byteLimiter := rate.NewLimiter(maxInspectBytesPerSecond, maxInspectBytesPerSecond)
 	var batch []manager.InspectedMessage
 	skipped, skippedAtLastSend := 0, 0
 	quietBatches := 0
@@ -508,19 +512,19 @@ func (s *Server) handleInspect(w http.ResponseWriter, r *http.Request) {
 			return
 		case message := <-tapped:
 			data := manager.PreviewOf(message.Data, previewBytes)
-			if tokens < 1 || byteTokens < len(data) {
+			// Check the message bucket first without taking from it, so a
+			// message refused by the byte bucket does not use up a message token.
+			now := time.Now()
+			if messageLimiter.TokensAt(now) < 1 || !byteLimiter.AllowN(now, len(data)) {
 				skipped++
 				continue
 			}
-			tokens--
-			byteTokens -= len(data)
+			messageLimiter.AllowN(now, 1)
 			batch = append(batch, manager.InspectedMessage{
 				TimeMillis: float64(message.Time) / float64(time.Millisecond),
 				Source:     message.Source, Length: len(message.Data), Data: data,
 			})
 		case <-batchTicker.C:
-			tokens = min(tokens+refillPerBatch, float64(maxPerSecond))
-			byteTokens = min(byteTokens+byteRefillPerBatch, maxInspectBytesPerSecond)
 			if len(batch) == 0 && skipped == skippedAtLastSend {
 				// Nothing new: only send an empty batch every 15 s as keep-alive.
 				if quietBatches++; quietBatches < 15*batchesPerSecond {

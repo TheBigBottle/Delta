@@ -13,7 +13,7 @@
  *     and returns an object with optional hooks:
  *       update()   called whenever new forwarder data arrives
  *       onEvent()  called for every new event-log entry
- *       redraw()   called when the color theme changes (canvas charts)
+ *       redraw()   called when the color theme changes (charts read their colors from CSS)
  *       destroy()  called when the user leaves the page
  *   - Changes (create, start, delete …) are sent to the JSON API with apiRequest().
  *     The server then pushes the new state, which updates every open tab.
@@ -541,7 +541,11 @@ function setHtmlIfChanged(element, html) {
   return true;
 }
 
-/* ================= canvas charts ================= */
+/* ================= charts ================= */
+
+// The sparklines of the forwarder list are drawn here on a small canvas (dozens
+// of them update every second, too many for a chart library). The traffic
+// chart of the detail page uses uPlot (web/vendor, see renderTrafficTab).
 
 const cssVariable = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
@@ -581,92 +585,6 @@ function drawSparkline(canvas, values, color) {
   context.fillStyle = color;
   context.fill();
   context.globalAlpha = 1;
-}
-
-// Rounds the y-axis maximum up to a "nice" number (e.g. 37 -> 40).
-function niceAxisMaximum(value) {
-  if (!(value > 0)) return 1;
-  const magnitude = 10 ** Math.floor(Math.log10(value));
-  for (const factor of [1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]) {
-    if (factor * magnitude >= value) return factor * magnitude;
-  }
-  return value;
-}
-
-// Throughput chart of the detail page.
-// chart = { times: [unix ms], series: [{ name, color, values }], formatValue }
-// hoverIndex highlights one point in time (mouse position) or is null.
-const CHART_PADDING = { left: 70, right: 14, top: 12, bottom: 26 };
-function drawLineChart(canvas, chart, hoverIndex) {
-  const [context, width, height] = prepareCanvas(canvas);
-  const { left, right, top, bottom } = CHART_PADDING;
-  const plotWidth = width - left - right, plotHeight = height - top - bottom;
-  const pointCount = chart.times.length;
-
-  let maxValue = 0;
-  for (const series of chart.series) for (const value of series.values) if (value > maxValue) maxValue = value;
-  const axisMax = niceAxisMaximum(maxValue);
-
-  // horizontal grid lines with y-axis labels
-  context.font = '11px ' + cssVariable('--sans');
-  context.fillStyle = cssVariable('--faint');
-  context.strokeStyle = cssVariable('--border');
-  context.lineWidth = 1;
-  context.textAlign = 'right';
-  context.textBaseline = 'middle';
-  for (let i = 0; i <= 4; i++) {
-    const y = Math.round(top + plotHeight - (plotHeight * i) / 4) + 0.5;
-    context.beginPath(); context.moveTo(left, y); context.lineTo(width - right, y); context.stroke();
-    context.fillText(chart.formatValue((axisMax * i) / 4), left - 10, y);
-  }
-  if (pointCount < 2) return;
-
-  const firstTime = chart.times[0];
-  const timeSpan = Math.max(chart.times[pointCount - 1] - firstTime, 1);
-  const xOf = index => left + ((chart.times[index] - firstTime) / timeSpan) * plotWidth;
-  const yOf = value => top + plotHeight - (value / axisMax) * plotHeight;
-
-  // x-axis time labels (first and last aligned inside the chart)
-  context.textBaseline = 'top';
-  for (let k = 0; k <= 4; k++) {
-    const labelTime = new Date(firstTime + (timeSpan * k) / 4);
-    context.textAlign = k === 0 ? 'left' : k === 4 ? 'right' : 'center';
-    context.fillText(`${zeroPad(labelTime.getHours())}:${zeroPad(labelTime.getMinutes())}:${zeroPad(labelTime.getSeconds())}`,
-      left + (plotWidth * k) / 4, height - bottom + 8);
-  }
-
-  // one line with a fading area fill per series
-  for (const series of chart.series) {
-    context.beginPath();
-    for (let i = 0; i < pointCount; i++) {
-      if (i) context.lineTo(xOf(i), yOf(series.values[i]));
-      else context.moveTo(xOf(i), yOf(series.values[i]));
-    }
-    context.strokeStyle = series.color;
-    context.lineWidth = 1.8;
-    context.lineJoin = 'round';
-    context.stroke();
-    context.lineTo(xOf(pointCount - 1), top + plotHeight);
-    context.lineTo(xOf(0), top + plotHeight);
-    const gradient = context.createLinearGradient(0, top, 0, top + plotHeight);
-    gradient.addColorStop(0, series.color + '33');
-    gradient.addColorStop(1, series.color + '00');
-    context.fillStyle = gradient;
-    context.fill();
-  }
-
-  // vertical hover line with a dot on each series
-  if (hoverIndex != null && hoverIndex < pointCount) {
-    const x = xOf(hoverIndex);
-    context.strokeStyle = cssVariable('--border-strong');
-    context.beginPath(); context.moveTo(x, top); context.lineTo(x, top + plotHeight); context.stroke();
-    for (const series of chart.series) {
-      context.beginPath();
-      context.arc(x, yOf(series.values[hoverIndex]), 3.5, 0, Math.PI * 2);
-      context.fillStyle = series.color;
-      context.fill();
-    }
-  }
 }
 
 /* ================= login, layout and navigation ================= */
@@ -742,7 +660,7 @@ function renderSetupPage(defaults = {}) {
           <label class="f" title="Where recorded captures are stored. A relative path is next to the config file">Data directory<input name="dataDir" value="${value('data_dir')}" placeholder="delta-data"></label>
           <div class="grid2">
             <label class="f" title="File every event is appended to (syslog-style text lines). A relative path is next to the config file; off keeps events in memory only">Event log file<input name="eventLog" value="${value('event_log')}" placeholder="delta-events.log"></label>
-            <label class="f" title="When the event log reaches this size it is renamed to .1 and a new file is started">Rotate event log at (MB)<input type="number" name="eventLogMaxMB" min="1" step="1" value="${value('event_log_max_mb')}"></label>
+            <label class="f" title="When the event log reaches this size it is renamed with a timestamp and a new file is started">Rotate event log at (MB)<input type="number" name="eventLogMaxMB" min="1" step="1" value="${value('event_log_max_mb')}"></label>
           </div>
           <div class="hint faint">Config file: ${value('config_path')}. Relative paths are resolved next to it.</div>
         </div>
@@ -822,7 +740,7 @@ function renderAppLayout() {
           <a href="#/events" data-nav="events" title="Log of connections, state changes, errors and alerts">${icon('bell')}<span>Events</span></a>
           <a href="#/captures" data-nav="captures" title="Recorded traffic: download it or replay it into a forwarder">${icon('disc')}<span>Captures</span></a>
           <a href="#/settings" data-nav="settings" title="Alerts, password, backup and import">${icon('sliders')}<span>Settings</span></a>
-          <a href="#/help" data-nav="help" title="How Delta works, with step-by-step tutorials (shortcut: ?)">${icon('help')}<span>Help</span></a>
+          <a href="#/help" data-nav="help" title="How Delta works (shortcut: ?)">${icon('help')}<span>Help</span></a>
         </nav>
         <div class="side-foot">
           <div class="live" id="live-totals" title="Live totals of all running forwarders, per second"></div>
@@ -842,7 +760,7 @@ function renderAppLayout() {
     document.documentElement.dataset.theme = newTheme;
     try { localStorage.setItem('delta-theme', newTheme); } catch { /* ignore */ }
     $('#theme-toggle').innerHTML = icon(newTheme === 'dark' ? 'sun' : 'moon');
-    state.currentPage?.redraw?.(); // canvas charts read their colors from CSS
+    state.currentPage?.redraw?.(); // charts read their colors from CSS
   };
   $('#logout').onclick = async () => {
     await apiRequest('POST', '/api/logout').catch(() => {});
@@ -1713,79 +1631,73 @@ function renderDetailPage(main, forwarderId) {
 
 /* ---------- detail tab: traffic chart ---------- */
 
+const CHART_HEIGHT = 260; // pixels, axes included
+
 function renderTrafficTab(container, forwarderId) {
   let metric = preferences.get('metric', 'bytes'); // "bytes" or "msgs"
   // Parallel arrays, oldest first: loaded from the server, then extended by the live updates.
   const history = { times: [], bytesIn: [], bytesOut: [], messages: [] };
-  let hoverIndex = null;
+  let chart = null; // the uPlot instance; rebuilt when the metric or the theme changes
 
   container.innerHTML = `<div class="card">
     <div class="card-h">
       <h2>Throughput</h2>
-      <div class="legend" id="chart-legend"></div>
       <span class="grow"></span>
       <div class="seg" id="metric-choice"><button data-metric="bytes" title="Data volume per second, received (In) and sent (Out)">Bytes/s</button><button data-metric="msgs" title="Received messages per second">Messages/s</button></div>
     </div>
-    <div class="card-b"><div class="chart-box"><canvas id="chart"></canvas><div class="tip hidden" id="chart-tooltip"></div></div></div>
+    <div class="card-b"><div class="chart-box" id="chart"></div></div>
   </div>`;
-  const canvas = $('#chart', container), tooltip = $('#chart-tooltip', container);
+  const chartBox = $('#chart', container);
 
-  function chartDefinition() {
-    if (metric === 'msgs') {
-      return { times: history.times, series: [{ name: 'Messages in', color: cssVariable('--accent'), values: history.messages }],
-        formatValue: value => formatCount(Math.round(value)) + '/s' };
-    }
-    return { times: history.times, formatValue: formatRate, series: [
-      { name: 'In', color: cssVariable('--accent'), values: history.bytesIn },
-      { name: 'Out', color: cssVariable('--out'), values: history.bytesOut },
-    ] };
-  }
+  // uPlot takes columns: the x values (unix seconds) and one array per line.
+  const chartData = () => [history.times.map(time => time / 1000),
+    ...(metric === 'msgs' ? [history.messages] : [history.bytesIn, history.bytesOut])];
 
-  function draw() {
+  // Builds the chart. Colors and fonts come from the CSS tokens, so it is
+  // built again when the theme changes (redraw).
+  function buildChart() {
+    chart?.destroy();
     $$('#metric-choice button', container).forEach(button => button.classList.toggle('on', button.dataset.metric === metric));
-    const chart = chartDefinition();
-    $('#chart-legend', container).innerHTML = chart.series.map(series => `<span><i style="background:${series.color}"></i>${series.name}</span>`).join('');
-    drawLineChart(canvas, chart, hoverIndex);
-    if (hoverIndex != null && history.times[hoverIndex]) {
-      tooltip.innerHTML = `<div style="opacity:.7">${formatClockTime(history.times[hoverIndex]).slice(0, 8)}</div>`
-        + chart.series.map(series => `${series.name}: <b>${chart.formatValue(series.values[hoverIndex])}</b>`).join('<br>');
-    }
+    const formatValue = metric === 'msgs' ? value => formatCount(Math.round(value)) + '/s' : formatRate;
+    const line = (label, colorToken) => {
+      const color = cssVariable(colorToken);
+      return { label, stroke: color, width: 1.8, fill: color + '22', points: { show: false },
+        value: (_, value) => (value == null ? '–' : formatValue(value)) }; // shown in the legend at the cursor
+    };
+    const axis = { stroke: cssVariable('--faint'), font: '11px ' + cssVariable('--sans'), ticks: { show: false },
+      grid: { stroke: cssVariable('--border'), width: 1 } };
+    chart = new uPlot({
+      width: chartBox.clientWidth, height: CHART_HEIGHT, // the legend with the values at the cursor goes below
+      series: [
+        { label: 'Time', value: (_, seconds) => (seconds == null ? '–' : formatClockTime(seconds * 1000).slice(0, 8)) },
+        ...(metric === 'msgs' ? [line('Messages in', '--accent')] : [line('In', '--accent'), line('Out', '--out')]),
+      ],
+      axes: [
+        // Time axis: whole-second steps (the data has one point per second), labels in the 24 h clock of the rest of the UI.
+        { ...axis, space: 70, incrs: [1, 2, 5, 10, 15, 30, 60, 120, 300, 600],
+          values: (_, ticks) => ticks.map(seconds => formatClockTime(seconds * 1000).slice(0, 8)) },
+        { ...axis, size: 72, values: (_, ticks) => ticks.map(formatValue) },
+      ],
+      scales: { y: { range: (_, min, max) => [0, max > 0 ? max * 1.1 : 1] } }, // always start at 0
+      cursor: { y: false, drag: { x: false, y: false } }, // a vertical line only; no zooming: the chart follows the live data
+    }, chartData(), chartBox);
   }
 
-  // Find the data point closest to the mouse position.
-  canvas.onmousemove = event => {
-    const box = canvas.getBoundingClientRect();
-    const count = history.times.length;
-    if (count < 2) return;
-    const plotWidth = box.width - CHART_PADDING.left - CHART_PADDING.right;
-    const mouseX = event.clientX - box.left;
-    const first = history.times[0], last = history.times[count - 1];
-    const mouseTime = first + ((mouseX - CHART_PADDING.left) / plotWidth) * (last - first);
-    let closest = 0;
-    for (let i = 0; i < count; i++) {
-      if (Math.abs(history.times[i] - mouseTime) < Math.abs(history.times[closest] - mouseTime)) closest = i;
-    }
-    hoverIndex = closest;
-    tooltip.classList.remove('hidden');
-    tooltip.style.left = Math.min(mouseX + 14, box.width - 170) + 'px';
-    tooltip.style.top = '12px';
-    draw();
-  };
-  canvas.onmouseleave = () => { hoverIndex = null; tooltip.classList.add('hidden'); draw(); };
   $('#metric-choice', container).onclick = event => {
     const chosen = event.target.closest('[data-metric]')?.dataset.metric;
-    if (chosen) { metric = chosen; preferences.set('metric', chosen); draw(); }
+    if (chosen) { metric = chosen; preferences.set('metric', chosen); buildChart(); }
   };
 
+  buildChart();
   apiRequest('GET', `/api/forwarders/${forwarderId}/history`).then(loaded => {
     history.times.unshift(...loaded.t);
     history.bytesIn.unshift(...loaded.in);
     history.bytesOut.unshift(...loaded.out);
     history.messages.unshift(...loaded.msgs);
-    draw();
+    chart.setData(chartData());
   }).catch(showError);
-  const resizeObserver = new ResizeObserver(() => draw());
-  resizeObserver.observe(canvas);
+  const resizeObserver = new ResizeObserver(() => chart.setSize({ width: chartBox.clientWidth, height: CHART_HEIGHT }));
+  resizeObserver.observe(chartBox);
 
   return {
     // Append one point per second from the live updates (max. 10 minutes).
@@ -1798,12 +1710,11 @@ function renderTrafficTab(container, forwarderId) {
       history.messages.push(fwd.rate.msgs);
       if (history.times.length > 600) {
         for (const values of Object.values(history)) values.shift();
-        if (hoverIndex != null) hoverIndex = Math.max(0, hoverIndex - 1);
       }
-      draw();
+      chart.setData(chartData());
     },
-    redraw: draw,
-    destroy: () => resizeObserver.disconnect(),
+    redraw: buildChart,
+    destroy: () => { resizeObserver.disconnect(); chart.destroy(); },
   };
 }
 
@@ -2750,7 +2661,7 @@ function renderSettingsPage(main) {
           <div class="card-h">${icon('activity')}<h2>Event log</h2></div>
           <div class="card-b stack">
             <label class="f">Log file<input name="eventLog" value="${escapeHtml(settings.event_log)}" placeholder="delta-events.log" title="File every event is appended to. A relative path is next to the config file; off keeps the events in memory only"><span class="hint">Every event is appended to this file (one syslog-style text line per event) and the newest 5000 are loaded again after a restart. A relative path is next to the config file. Enter <code>off</code> to keep events in memory only.</span></label>
-            <label class="f">Rotate at (MB)<input type="number" name="eventLogMaxMB" min="1" step="1" value="${settings.event_log_max_mb}" style="max-width:160px" title="When the file reaches this size it is renamed to .1 and a new file is started"><span class="hint">A full file is renamed to <code>&lt;file&gt;.1</code> (replacing the older one), so at most twice this size is used.</span></label>
+            <label class="f">Rotate at (MB)<input type="number" name="eventLogMaxMB" min="1" step="1" value="${settings.event_log_max_mb}" style="max-width:160px" title="When the file reaches this size it is renamed with a timestamp and a new file is started"><span class="hint">A full file is renamed to <code>&lt;name&gt;-&lt;timestamp&gt;.log</code> (replacing the older one), so at most twice this size is used.</span></label>
             <div class="muted" id="event-log-path" title="The file Delta is writing to right now">In use: ${escapeHtml(settings.event_log_path || 'off (memory only)')}</div>
             <div class="row"><button class="btn primary" title="Switch to this log file and size">Save</button></div>
           </div>

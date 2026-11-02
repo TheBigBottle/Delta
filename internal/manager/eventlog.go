@@ -3,8 +3,8 @@ package manager
 // The event log: everything Delta reports (starts, stops, connects, errors,
 // alerts). The newest events are kept in memory for the web interface, and
 // every event is also appended to a log file, so the history survives a
-// restart. The file is rotated when it gets too big (the old part is kept
-// as "<file>.1").
+// restart. The file is rotated when it gets too big (by lumberjack; the old
+// part is kept as "<name>-<timestamp><ext>").
 //
 // The file uses a syslog-style text format (timestamp as in RFC 5424), one
 // event per line, so it can be read with less, grep or any log tool:
@@ -26,6 +26,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"gopkg.in/natefinch/lumberjack.v2"
 
 	"delta/internal/config"
 )
@@ -49,11 +51,9 @@ type EventLog struct {
 	lastID uint64
 	bus    *EventBus
 
-	// The log file. file is nil when the file log is switched off or could not be opened.
-	file         *os.File
-	filePath     string
-	fileSize     int64
-	maxFileSize  int64
+	// The log file, written and rotated by lumberjack. nil when the file log
+	// is switched off or could not be opened.
+	file         *lumberjack.Logger
 	writeFailing bool // set after a failed write, so a full disk is reported only once
 }
 
@@ -107,35 +107,37 @@ func (log *EventLog) NewestFirst(forwarderID string, limit int) []Event {
 // OpenFile switches the file log to path (empty = off). The newest events of
 // the file (and of its rotated part) are loaded into memory if nothing has
 // been logged yet, i.e. at startup. An error leaves the previous file in use.
-func (log *EventLog) OpenFile(path string, maxFileSize int64) error {
+func (log *EventLog) OpenFile(path string, maxMegabytes int) error {
 	log.mu.Lock()
 	defer log.mu.Unlock()
-	if path == log.filePath && log.file != nil {
-		log.maxFileSize = maxFileSize
+	if log.file != nil && path == log.file.Filename {
+		log.file.MaxSize = maxMegabytes // read by lumberjack on the next write, which also happens under log.mu
 		return nil
 	}
 	if path == "" {
 		log.closeFileLocked()
-		log.filePath, log.maxFileSize = "", maxFileSize
 		return nil
 	}
+	// lumberjack opens the file only on the first write. Open it once here,
+	// so a wrong path or missing permission is reported to the user right away.
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return fmt.Errorf("event log: %w", err)
 	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o640)
+	probe, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o640)
 	if err != nil {
 		return fmt.Errorf("event log: %w", err)
 	}
-	info, err := file.Stat()
-	if err != nil {
-		file.Close()
-		return fmt.Errorf("event log: %w", err)
-	}
+	probe.Close()
 	if log.lastID == 0 {
 		log.loadFromFilesLocked(path)
 	}
 	log.closeFileLocked()
-	log.file, log.filePath, log.fileSize, log.maxFileSize, log.writeFailing = file, path, info.Size(), maxFileSize, false
+	// lumberjack appends to the file and, when the next line would make it
+	// bigger than MaxSize megabytes, renames it to "<name>-<timestamp><ext>"
+	// and starts a new one. MaxBackups 1 keeps only the newest rotated part,
+	// so the log never uses more than about twice MaxSize.
+	log.file = &lumberjack.Logger{Filename: path, MaxSize: maxMegabytes, MaxBackups: 1, LocalTime: true}
+	log.writeFailing = false
 	return nil
 }
 
@@ -153,12 +155,32 @@ func (log *EventLog) closeFileLocked() {
 	}
 }
 
-// loadFromFilesLocked reads the rotated part and then the current file, keeps
+// rotatedLogFiles returns the rotated parts of the log file at path, oldest
+// first: "<file>.1" as written by Delta before 1.6, then the parts lumberjack
+// renamed to "<name>-<timestamp><ext>" (the timestamp sorts by time).
+func rotatedLogFiles(path string) []string {
+	files := []string{path + ".1"}
+	extension := filepath.Ext(path)
+	prefix := strings.TrimSuffix(path, extension) + "-"
+	candidates, _ := filepath.Glob(prefix + "*" + extension) // sorted by name
+	for _, candidate := range candidates {
+		timestamp := strings.TrimSuffix(strings.TrimPrefix(candidate, prefix), extension)
+		if _, err := time.Parse(rotatedFileTimeFormat, timestamp); err == nil { // skip unrelated files
+			files = append(files, candidate)
+		}
+	}
+	return files
+}
+
+// rotatedFileTimeFormat is the timestamp lumberjack puts into the name of a rotated file.
+const rotatedFileTimeFormat = "2006-01-02T15-04-05.000"
+
+// loadFromFilesLocked reads the rotated parts and then the current file, keeps
 // the newest EventLogCapacity events in memory and continues their numbering.
 // Lines that cannot be parsed (e.g. cut off by a crash) are skipped.
 func (log *EventLog) loadFromFilesLocked(path string) {
 	var loaded []Event
-	for _, name := range []string{path + ".1", path} {
+	for _, name := range append(rotatedLogFiles(path), path) {
 		file, err := os.Open(name)
 		if err != nil {
 			if !errors.Is(err, fs.ErrNotExist) {
@@ -186,24 +208,15 @@ func (log *EventLog) loadFromFilesLocked(path string) {
 	}
 }
 
-// appendToFileLocked writes one event as a JSON line and rotates the file
-// when it would grow beyond maxFileSize. log.mu must be held.
+// appendToFileLocked writes one event as a line of the log file (lumberjack
+// rotates the file when needed). log.mu must be held.
 func (log *EventLog) appendToFileLocked(event Event) {
 	if log.file == nil {
 		return
 	}
-	line := []byte(formatLogLine(event))
-	if log.maxFileSize > 0 && log.fileSize > 0 && log.fileSize+int64(len(line)) > log.maxFileSize {
-		log.rotateLocked()
-		if log.file == nil {
-			return
-		}
-	}
-	written, err := log.file.Write(line)
-	log.fileSize += int64(written)
-	if err != nil {
-		if !log.writeFailing {
-			slog.Error("event log: write failed", "file", log.filePath, "err", err)
+	if _, err := log.file.Write([]byte(formatLogLine(event))); err != nil {
+		if !log.writeFailing { // report a full disk once, not for every event
+			slog.Error("event log: write failed", "file", log.file.Filename, "err", err)
 		}
 		log.writeFailing = true
 		return
@@ -211,27 +224,14 @@ func (log *EventLog) appendToFileLocked(event Event) {
 	log.writeFailing = false
 }
 
-// rotateLocked renames the full file to "<file>.1" (replacing an older one)
-// and starts a new, empty file.
-func (log *EventLog) rotateLocked() {
-	log.file.Close()
-	log.file = nil
-	if err := os.Rename(log.filePath, log.filePath+".1"); err != nil {
-		slog.Error("event log: rotation failed", "file", log.filePath, "err", err)
-	}
-	file, err := os.OpenFile(log.filePath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o640)
-	if err != nil {
-		slog.Error("event log: cannot reopen file", "file", log.filePath, "err", err)
-		return
-	}
-	log.file, log.fileSize = file, 0
-}
-
 // FilePath returns the log file in use ("" when the file log is off).
 func (log *EventLog) FilePath() string {
 	log.mu.Lock()
 	defer log.mu.Unlock()
-	return log.filePath
+	if log.file == nil {
+		return ""
+	}
+	return log.file.Filename
 }
 
 // ---- the line format ----

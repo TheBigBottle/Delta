@@ -6,7 +6,7 @@ Delta forwards TCP/UDP data streams, such as NMEA telegrams or raw bit streams, 
 An input can receive from many senders at once (several clients on a listen port, several devices Delta connects to,
 or UDP datagrams from any number of hosts); their messages are merged, and every output gets a copy.
 You manage it through a password-protected web interface.
-It is a single static binary with no dependencies, and the web UI is built in.
+It is a single static binary with no runtime dependencies: the web UI, the help pages and the few libraries it uses are built in, so it works on servers without internet access.
 
 ## Build & run
 
@@ -147,7 +147,7 @@ Forwarders without an `id` get one automatically.
   Severity is `INFO`, `WARNING` or `ERROR`; events of a forwarder carry its ID in brackets and its name before the colon.
   A relative path is resolved against the config file's directory; `off` keeps events in memory only.
   At startup the newest 5000 events are loaded again, so the event list survives a restart.
-- `event_log_max_mb` (default 10): when the event log reaches this size it is renamed to `<file>.1` (replacing the older one)
+- `event_log_max_mb` (default 10): when the event log reaches this size it is renamed with a timestamp, e.g. `delta-events-2026-11-02T10-15-00.000.log` (replacing the older one),
   and a new file is started, so at most about twice this size is used. Both settings can also be changed under Settings → Event log.
 - `framing`:
   - `lines` splits the stream at `\n`, so every NMEA sentence is forwarded whole, including to UDP targets.
@@ -194,7 +194,7 @@ Measured on loopback (`go test -run Latency -v ./internal/engine`), TCP source �
   - Alerts are sent to a webhook (works with Slack, Mattermost, Teams, Discord, ntfy, …) and written to the event log.
 - **Events:** one log of everything, filterable by level and searchable. It is also written to the event log file and survives restarts.
 - **Settings:** webhook, event log file, password change, JSON export and import.
-- **Help:** built-in documentation with tutorials, diagrams and annotated examples of every screen (`#/help`, or press `?`).
+- **Help:** built-in documentation (`#/help`, or press `?`), written in plain Markdown in `web/help.md`.
 
 ## REST API
 
@@ -239,35 +239,16 @@ For ufw: `sudo ufw allow 10110/tcp`.
 
 **An output shows "host unreachable" although the target answers ping.** A firewall on the *target* rejects that port; open it there (same commands).
 
-## Development
+## Third-party libraries
 
-```bash
-go test -race ./...        # all tests; the engine tests run over real sockets (fan-out, framing, reconnect, slow clients, leaks, latency)
-go run ./cmd/delta -config /tmp/delta-test/delta.json -port 18470   # run from source
-```
+All of them are compiled or embedded into the binary; nothing is loaded from the internet at runtime.
 
-Project layout (standard Go layout, standard library only):
-
-```
-cmd/delta/          main package: command line, startup, shutdown
-internal/config/    config file format, validation, atomic saving, password hashing
-internal/engine/    the data path: endpoints, framing, per-output queues, reconnects
-internal/manager/   forwarder lifecycle, rates, alerts, event log, captures and replay
-internal/api/       HTTP API, login, live streams (server-sent events)
-web/                the web interface (HTML, CSS, JavaScript), embedded into the binary
-scripts/build.sh    format check, vet, tests, static (cross-)builds
-```
-
-**Releases** are made locally with the [GitHub CLI](https://cli.github.com/) (`gh auth login` once):
-
-```bash
-VERSION=1.5.0 scripts/build.sh --all                 # tests + all binaries in dist/
-(cd dist && sha256sum delta-* > SHA256SUMS)
-git tag -a v1.5.0 -m "Delta 1.5.0" && git push origin v1.5.0
-gh release create v1.5.0 dist/delta-* dist/SHA256SUMS --title "Delta v1.5.0" --generate-notes
-```
-
-The web interface uses plain HTTP. If you expose it beyond a trusted network, put it behind a TLS reverse proxy.
+| Library | Used for | License |
+|---|---|---|
+| [goldmark](https://github.com/yuin/goldmark) | renders the help page from `web/help.md` | MIT |
+| [lumberjack](https://github.com/natefinch/lumberjack) | writes and rotates the event log file | MIT |
+| [golang.org/x/time/rate](https://pkg.go.dev/golang.org/x/time/rate) | rate limits for the event log and the live inspector | BSD-3-Clause |
+| [uPlot](https://github.com/leeoniya/uPlot) 1.6.32 | the throughput chart (`web/vendor/`) | MIT |
 
 ## AI disclaimer
 

@@ -49,7 +49,7 @@ type Config struct {
 	SessionHours int    `json:"session_hours"` // how long a login stays valid
 	// EventLog is the file every event is appended to (relative to the config
 	// file, "off" = memory only). EventLogMaxMB is the size at which it is
-	// rotated; the previous part is kept as "<file>.1".
+	// rotated; the previous part is kept as "<name>-<timestamp><ext>".
 	EventLog      string            `json:"event_log"`
 	EventLogMaxMB int               `json:"event_log_max_mb"`
 	Alerts        AlertConfig       `json:"alerts"`

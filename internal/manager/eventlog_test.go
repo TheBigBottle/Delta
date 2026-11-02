@@ -16,7 +16,7 @@ func TestEventLogFileSurvivesRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "events.log")
 	bus := &EventBus{subscribers: map[chan []byte]struct{}{}}
 	first := newEventLog(bus)
-	if err := first.OpenFile(path, 1<<20); err != nil {
+	if err := first.OpenFile(path, 1); err != nil {
 		t.Fatal(err)
 	}
 	first.Add("info", "f1", "GPS", "started")
@@ -24,7 +24,7 @@ func TestEventLogFileSurvivesRestart(t *testing.T) {
 	first.CloseFile()
 
 	second := newEventLog(bus)
-	if err := second.OpenFile(path, 1<<20); err != nil {
+	if err := second.OpenFile(path, 1); err != nil {
 		t.Fatal(err)
 	}
 	second.Add("info", "", "", "Delta started")
@@ -40,30 +40,44 @@ func TestEventLogFileSurvivesRestart(t *testing.T) {
 	}
 }
 
-// A full file is rotated to "<file>.1", and both parts are loaded at startup.
+// A full file is rotated (lumberjack: "<name>-<timestamp><ext>"), only one
+// rotated part is kept, and the rotated part plus the current file are
+// loaded at startup, together with a "<file>.1" left by older versions.
 func TestEventLogRotation(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "events.log")
-	bus := &EventBus{subscribers: map[chan []byte]struct{}{}}
-	log := newEventLog(bus)
-	if err := log.OpenFile(path, 1000); err != nil {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "events.log")
+	legacyLine := formatLogLine(Event{Time: time.Now(), Level: "info", Message: "from an older Delta"})
+	if err := os.WriteFile(path+".1", []byte(legacyLine), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for range 30 {
-		log.Add("info", "", "", "a message that is long enough to fill the file quickly")
+	bus := &EventBus{subscribers: map[chan []byte]struct{}{}}
+	log := newEventLog(bus)
+	if err := log.OpenFile(path, 1); err != nil {
+		t.Fatal(err)
+	}
+	if loaded := log.NewestFirst("", 10); len(loaded) != 1 || loaded[0].Message != "from an older Delta" {
+		t.Fatalf("legacy .1 file not loaded: %+v", loaded)
+	}
+	message := strings.Repeat("a message that is long enough to fill the file quickly ", 4)
+	for range 2 * (1 << 20) / len(message) { // about two megabytes: rotates at least once
+		log.Add("info", "", "", message)
 	}
 	log.CloseFile()
-	for _, name := range []string{path, path + ".1"} {
-		info, err := os.Stat(name)
-		if err != nil || info.Size() > 1000 {
+	rotated, _ := filepath.Glob(filepath.Join(directory, "events-*.log"))
+	if len(rotated) == 0 {
+		t.Fatal("the file was not rotated")
+	}
+	for _, name := range append(rotated, path) {
+		if info, err := os.Stat(name); err != nil || info.Size() > 1<<20 {
 			t.Fatalf("%s: %v, size limit not kept", name, err)
 		}
 	}
 	reloaded := newEventLog(bus)
-	if err := reloaded.OpenFile(path, 1000); err != nil {
+	if err := reloaded.OpenFile(path, 1); err != nil {
 		t.Fatal(err)
 	}
-	if count := len(reloaded.NewestFirst("", 100)); count < 5 || count >= 30 {
-		t.Fatalf("loaded %d events from both parts", count)
+	if count := len(reloaded.NewestFirst("", EventLogCapacity)); count != EventLogCapacity {
+		t.Fatalf("loaded %d events, want the newest %d", count, EventLogCapacity)
 	}
 }
 

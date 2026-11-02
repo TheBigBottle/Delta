@@ -7,6 +7,9 @@ One input can receive from many senders at once: several clients on a listen por
 or UDP datagrams from any number of hosts. Delta merges their messages and sends a copy to every output.
 You manage it through a web interface with a password.
 Delta is a single static binary. The web interface, the help pages and the libraries it uses are built in, so it runs on servers without internet access.
+Delta runs on Linux only (amd64, arm64, armv7 and 386, e.g. a Raspberry Pi). Windows and macOS are not supported.
+
+![The Forwarders page with six forwarders: live traffic, tags, comments under the names, one forwarder whose output target is down, and one stopped forwarder](docs/forwarders.png)
 
 ## Build & run
 

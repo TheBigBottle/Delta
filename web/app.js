@@ -415,16 +415,33 @@ function showHint(element) {
 document.addEventListener('mouseover', event => {
   const element = event.target.closest?.('[title], [data-hint]');
   if (element === hintTarget) return;
-  hideHint();
-  if (!element) return;
-  if (element.hasAttribute('title')) {
+  if (element?.hasAttribute('title')) {
     element.dataset.hint = element.getAttribute('title');
     element.removeAttribute('title');
   }
+  // Live parts of the page are redrawn every second, which replaces the element
+  // under the mouse with a new one with the same hint, and the browser reports
+  // that as a new "mouseover". Hiding and showing the bubble again then made it
+  // flicker. Instead the bubble simply moves over to the new element.
+  if (element && hintTarget && !hintTarget.isConnected && element.dataset.hint === hintTarget.dataset.hint) {
+    const bubbleWasShown = hintBubble.classList.contains('show');
+    hintTarget = element;
+    if (bubbleWasShown) {
+      showHint(element);
+    } else {  // still waiting to show it: wait for the new element instead
+      clearTimeout(hintTimer);
+      hintTimer = setTimeout(() => { if (hintTarget === element && element.isConnected) showHint(element); }, 350);
+    }
+    return;
+  }
+  hideHint();
+  if (!element) return;
   hintTarget = element;
   hintTimer = setTimeout(() => { if (hintTarget === element && element.isConnected) showHint(element); }, 350);
 });
 document.addEventListener('mousedown', hideHint);
+// The mouse left the window: no element gets a "mouseover", so hide here.
+document.addEventListener('mouseout', event => { if (!event.relatedTarget) hideHint(); });
 window.addEventListener('scroll', event => {
   if (hintTarget && (event.target === document || event.target.contains?.(hintTarget))) hideHint();
 }, true);
@@ -1030,14 +1047,28 @@ function renderForwarderListPage(main) {
       clientsOut += fwd.clients_out;
       if (hasIssue(fwd)) issueCount++;
     }
-    $('#summary-tiles').innerHTML = `
-      <div class="tile" title="Running forwarders / all forwarders"><div class="k">${icon('layers')}Running</div><div class="v">${runningCount}<small>/ ${state.forwarders.length}</small></div></div>
-      <div class="tile" title="Bytes per second received by all inputs together"><div class="k">${icon('arrowIn')}Inbound</div><div class="v">${formatRate(rateIn)}</div></div>
-      <div class="tile" title="Bytes per second sent by all outputs together. Higher than inbound when data goes to several outputs or clients"><div class="k">${icon('arrowOut')}Outbound</div><div class="v">${formatRate(rateOut)}</div></div>
-      <div class="tile" title="Messages received per second by all inputs (with line framing: NMEA sentences)"><div class="k">${icon('activity')}Messages</div><div class="v">${formatCount(Math.round(messagesPerSecond))}<small>/s</small></div></div>
-      <div class="tile" title="Sources connected to the inputs of all forwarders: TCP clients, active UDP senders and remote hosts Delta connected to"><div class="k">${icon('arrowIn')}Clients in</div><div class="v">${clientsIn}</div></div>
-      <div class="tile" title="Receivers connected to the outputs of all forwarders: TCP clients and targets Delta connected to"><div class="k">${icon('arrowOut')}Clients out</div><div class="v">${clientsOut}</div></div>
-      <div class="tile ${issueCount ? 'bad' : ''}" title="Forwarders that failed to start, have a disconnected endpoint or a firing alert. Use the Issues filter to list them"><div class="k">${icon('alert')}Issues</div><div class="v">${issueCount}</div></div>`;
+    // The tiles are built once; afterwards only their numbers change. Replacing
+    // them every second would disturb the hover hint of the tile under the mouse.
+    const tiles = $('#summary-tiles');
+    if (!tiles.querySelector('[data-tile]')) {
+      tiles.innerHTML = `
+        <div class="tile" title="Running forwarders / all forwarders"><div class="k">${icon('layers')}Running</div><div class="v"><span data-tile="running"></span><small data-tile="total"></small></div></div>
+        <div class="tile" title="Bytes per second received by all inputs together"><div class="k">${icon('arrowIn')}Inbound</div><div class="v" data-tile="in"></div></div>
+        <div class="tile" title="Bytes per second sent by all outputs together. Higher than inbound when data goes to several outputs or clients"><div class="k">${icon('arrowOut')}Outbound</div><div class="v" data-tile="out"></div></div>
+        <div class="tile" title="Messages received per second by all inputs (with line framing: NMEA sentences)"><div class="k">${icon('activity')}Messages</div><div class="v"><span data-tile="messages"></span><small>/s</small></div></div>
+        <div class="tile" title="Sources connected to the inputs of all forwarders: TCP clients, active UDP senders and remote hosts Delta connected to"><div class="k">${icon('arrowIn')}Clients in</div><div class="v" data-tile="clients-in"></div></div>
+        <div class="tile" title="Receivers connected to the outputs of all forwarders: TCP clients and targets Delta connected to"><div class="k">${icon('arrowOut')}Clients out</div><div class="v" data-tile="clients-out"></div></div>
+        <div class="tile" data-tile-issues title="Forwarders that failed to start, have a disconnected endpoint or a firing alert. Use the Issues filter to list them"><div class="k">${icon('alert')}Issues</div><div class="v" data-tile="issues"></div></div>`;
+    }
+    const tileValues = {
+      running: runningCount, total: `/ ${state.forwarders.length}`, in: formatRate(rateIn), out: formatRate(rateOut),
+      messages: formatCount(Math.round(messagesPerSecond)), 'clients-in': clientsIn, 'clients-out': clientsOut, issues: issueCount,
+    };
+    for (const [name, value] of Object.entries(tileValues)) {
+      const valueElement = tiles.querySelector(`[data-tile="${name}"]`);
+      if (valueElement.textContent !== String(value)) valueElement.textContent = value;
+    }
+    tiles.querySelector('[data-tile-issues]').classList.toggle('bad', issueCount > 0);
     const count = state.forwarders.length;
     $('#list-subtitle').textContent = `${count} forwarder${count === 1 ? '' : 's'} · ${runningCount} running`;
   }

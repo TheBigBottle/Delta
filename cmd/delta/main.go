@@ -32,7 +32,7 @@ import (
 	"delta/internal/manager"
 )
 
-var version = "1.7.0"
+var version = "1.7.1"
 
 func main() {
 	configPath := flag.String("config", "delta.json", "config file; created if missing (the web interface then asks for a password)")

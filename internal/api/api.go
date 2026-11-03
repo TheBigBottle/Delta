@@ -7,6 +7,7 @@ package api
 // embedded static files of the web interface.
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -85,6 +86,11 @@ func (s *Server) Routes() http.Handler {
 	})
 	protected("PUT /api/settings", s.handleUpdateSettings)
 	protected("POST /api/settings/test-webhook", s.handleTestWebhook)
+	protected("GET /api/update", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, s.manager.UpdateStatus())
+	})
+	protected("POST /api/update/check", s.handleUpdateCheck)
+	protected("POST /api/update/install", s.handleUpdateInstall)
 	protected("GET /api/captures", s.handleListCaptures)
 	protected("POST /api/captures", s.handleUploadCapture)
 	protected("GET /api/captures/{name}", s.handleDownloadCapture)
@@ -428,6 +434,9 @@ func (s *Server) handleLiveStream(w http.ResponseWriter, r *http.Request) {
 	}
 	initialList, _ := json.Marshal(s.manager.List())
 	fmt.Fprintf(w, "event: forwarders\ndata: %s\n\n", initialList)
+	// Also after a reconnect: update events sent while the tab was away are lost.
+	updateStatus, _ := json.Marshal(s.manager.UpdateStatus())
+	fmt.Fprintf(w, "event: update\ndata: %s\n\n", updateStatus)
 	flusher.Flush()
 
 	keepAlive := time.NewTicker(20 * time.Second) // keeps proxies from closing an idle connection
@@ -563,6 +572,33 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.manager.Settings())
+}
+
+// handleUpdateCheck asks GitHub for the latest release now and returns the result.
+func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
+	// Not cancelled when the browser leaves the page: the result is still
+	// recorded and sent to every open tab as an "update" event.
+	status, err := s.manager.CheckForUpdate(context.WithoutCancel(r.Context()))
+	if errors.Is(err, manager.ErrUpdateBusy) {
+		writeJSON(w, http.StatusOK, status) // the running check or install reports its result itself
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+// handleUpdateInstall starts installing the release found by the last check.
+// It answers at once; progress arrives as "update" events on /api/stream, and
+// on success Delta restarts.
+func (s *Server) handleUpdateInstall(w http.ResponseWriter, r *http.Request) {
+	if err := s.manager.InstallUpdate(); err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, s.manager.UpdateStatus())
 }
 
 func (s *Server) handleTestWebhook(w http.ResponseWriter, r *http.Request) {

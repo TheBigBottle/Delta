@@ -15,8 +15,8 @@ Delta runs on Linux only (amd64, arm64, armv7 and 386, e.g. a Raspberry Pi). Win
 
 ```bash
 scripts/build.sh                    # format check, vet, tests, static binary ./delta
-scripts/build.sh --all              # also amd64/arm64/armv7/386 binaries in dist/
-VERSION=1.1.0 scripts/build.sh      # embed a version number (--skip-tests to skip the tests)
+scripts/build.sh --all              # also amd64/arm64/armv7/386 binaries and SHA256SUMS in dist/
+VERSION=1.8.0 scripts/build.sh      # embed a version number (--skip-tests to skip the tests)
 ./delta                             # uses ./delta.json, creates it on first start
 ./delta -config /etc/delta/delta.json -port 8080
 ```
@@ -125,6 +125,28 @@ Forwarders that were running start again after a reboot (`autostart`). To reset 
 add `"password"` to `/var/lib/delta/delta.json` and start it again.
 To update, replace `/usr/local/bin/delta` and run `sudo systemctl restart delta`.
 
+### Updates from the web interface
+
+Delta can update itself (Settings → Updates, off by default). It downloads the release binary for the machine, checks it against
+`SHA256SUMS`, runs it with `-version`, keeps the old binary as `<binary>.old` and restarts with the same command line.
+The process ID stays the same, so systemd does not notice the restart.
+A binary built without `VERSION` reports the version `dev` and is never replaced by a release, so a self-built Delta is not overwritten.
+
+This needs write access to the folder of the binary, which the setup above does not give (root-owned `/usr/local/bin`, `ProtectSystem=strict`).
+To let Delta update itself, put the binary in a folder owned by the service user and allow writing to it:
+
+```bash
+sudo install -d -o delta -g delta /opt/delta
+sudo install -o delta -g delta -m 0755 delta-linux-amd64 /opt/delta/delta
+```
+
+```ini
+ExecStart=/opt/delta/delta -config /var/lib/delta/delta.json
+ReadWritePaths=/opt/delta
+```
+
+The trade-off: the service user can then change its own binary. Keep the root-owned setup if you prefer to update by hand.
+
 ## Config file
 
 One JSON file holds the settings and all forwarders. Delta rewrites it whenever you change something in the web interface, using a temporary file and a rename so it is never half written.
@@ -141,6 +163,7 @@ A forwarder without an `id` gets one automatically.
   "event_log": "delta-events.log",
   "event_log_max_mb": 10,
   "alerts": { "webhook_url": "", "down_after": 30 },
+  "updates": { "check": false, "auto_install": false },
   "forwarders": [
     {
       "name": "GPS bridge",
@@ -172,6 +195,8 @@ A forwarder without an `id` gets one automatically.
   At startup Delta loads the newest 5000 events again, so the event list survives a restart.
 - `event_log_max_mb` (default 10): when the event log reaches this size, Delta renames it with a timestamp, e.g. `delta-events-2026-11-02T10-15-00.000.log`, deletes the previous renamed file
   and starts a new one. The log therefore uses at most about twice this size. You can also change both settings under Settings → Event log.
+- `updates.check` makes Delta ask GitHub for a new release at startup and once a day; `updates.auto_install` also installs it and restarts.
+  Both are off by default. See *Updates* below.
 - `framing` is either `lines` or `raw`. With `lines`, Delta splits the stream at `\n` and forwards every NMEA sentence whole, also to UDP targets. With `raw`, it forwards the bytes exactly as they arrive.
 
 ### Endpoint modes
@@ -240,7 +265,7 @@ Delta has two kinds of alerts. A down alert fires when a forwarder failed to sta
 
 The Events page is one log of everything, which you can filter by level and search. It is also written to the event log file and survives restarts.
 
-Under Settings you set the webhook and the event log file, change the password, and export or import forwarders as JSON.
+Under Settings you set the webhook and the event log file, switch the update check on, change the password, and export or import forwarders as JSON.
 
 The built-in help (`#/help`, or press `?`) is plain Markdown in `web/help.md`.
 
@@ -267,6 +292,7 @@ Main routes:
 - `GET /api/interfaces` (IP addresses of the machine, offered as bind addresses)
 - `GET /api/export`, `POST /api/import`
 - `GET|PUT /api/settings`
+- `GET /api/update`, `POST /api/update/check`, `POST /api/update/install` (installs and restarts)
 - `GET|POST /api/captures`
 - `GET|DELETE /api/captures/{name}`
 - `GET /api/captures/{name}/records?from=&limit=&bytes=&filter=` (paged; `next` in the response continues)

@@ -30,9 +30,13 @@ import (
 	"delta/internal/api"
 	"delta/internal/config"
 	"delta/internal/manager"
+	"delta/internal/updater"
 )
 
-var version = "1.7.2"
+// version is set by release builds (VERSION=1.8.0 scripts/build.sh, which
+// passes -X main.version). A build without it is "dev": the update check never
+// replaces such a self-built binary with a release.
+var version = "dev"
 
 func main() {
 	configPath := flag.String("config", "delta.json", "config file; created if missing (the web interface then asks for a password)")
@@ -64,6 +68,12 @@ func main() {
 	deltaManager := manager.New(*configPath, cfg)
 	deltaManager.WebAddress = webAddress
 	deltaManager.Version = version
+	deltaManager.Updater = updater.New(version)
+	deltaManager.Updater.RemoveLeftovers() // of an install that was cut short
+	// Testing hook: point the update check at a local fake of the GitHub API.
+	if releaseURL := os.Getenv("DELTA_RELEASE_URL"); releaseURL != "" {
+		deltaManager.Updater.ReleaseURL = releaseURL
+	}
 	listener, err := net.Listen("tcp", webAddress)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "delta: web interface:", err)
@@ -81,6 +91,7 @@ func main() {
 	deltaManager.StartAutostartForwarders()
 	stopSampler := make(chan struct{})
 	go deltaManager.RunSampler(stopSampler)
+	go deltaManager.RunUpdateChecker(stopSampler)
 	go func() {
 		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 			slog.Error("web server failed", "err", err)
@@ -95,11 +106,17 @@ func main() {
 		slog.Warn("no password set: open the web interface now to choose one", "web", "http://"+displayAddress(webBind, webPort))
 	}
 
-	// Run until Ctrl+C or SIGTERM (e.g. systemctl stop), then shut down cleanly.
+	// Run until Ctrl+C or SIGTERM (e.g. systemctl stop), or until an update
+	// was installed, then shut down cleanly.
 	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
-	<-signalCtx.Done()
-	slog.Info("shutting down")
+	newBinaryPath := ""
+	select {
+	case <-signalCtx.Done():
+		slog.Info("shutting down")
+	case newBinaryPath = <-deltaManager.RestartRequests():
+		slog.Info("update installed, restarting", "binary", newBinaryPath)
+	}
 	cancelServerCtx()
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancelShutdown()
@@ -108,6 +125,29 @@ func main() {
 	deltaManager.Shutdown()
 	deltaManager.Events.Add("info", "", "", "Delta stopped")
 	deltaManager.Events.CloseFile()
+
+	// A stop request (e.g. systemctl stop, reboot) that arrived during the
+	// shutdown above wins over the restart: the new binary is already in
+	// place and starts the next time Delta is started.
+	if newBinaryPath != "" && signalCtx.Err() == nil {
+		restartInto(newBinaryPath)
+	}
+}
+
+// restartInto replaces this process with the freshly installed binary, with
+// the same arguments and environment. The process ID stays the same, so a
+// service manager such as systemd does not notice the restart. All sockets
+// are already closed by the shutdown above (Go opens them close-on-exec
+// anyway). The forwarders come back from their autostart flags.
+//
+// The path comes from the updater: after the binary was renamed,
+// os.Executable() would point to the old file ("<binary>.old").
+func restartInto(binaryPath string) {
+	err := syscall.Exec(binaryPath, os.Args, os.Environ())
+	// Exec only returns on failure. Exit with an error, so a service manager
+	// set to restart on failure starts Delta again (with the new binary).
+	slog.Error("restart failed; start Delta again by hand", "binary", binaryPath, "err", err)
+	os.Exit(1)
 }
 
 // displayAddress returns an address that can be clicked in the startup log.

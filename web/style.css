@@ -296,7 +296,7 @@ canvas.spark { width: 80px; height: 26px; display: block; }
 .login .logo svg { width: 30px; height: 30px; }
 .login h1 { text-align: center; font-size: 22px; }
 .login p { text-align: center; margin: -8px 0 6px; color: var(--muted); }
-.login input { height: 40px; }
+.login input:not([type=checkbox]) { height: 40px; }
 /* The first-start page is a wider form with sections (password, web interface, files, alerts). */
 .login form.setup-form { max-width: 640px; margin: 32px 0; }
 .login form.setup-form .sect { padding-top: 14px; border-top: 1px solid var(--border); }
@@ -401,3 +401,5 @@ table.t.compact td { padding: 7px 12px; font-size: 13px; }
 .host-line .addr { margin: 0; }
 .host-state { font-size: 11.5px; color: var(--warn); }
 @media (max-width: 900px) { .target-row { grid-template-columns: 1fr 90px auto; } }
+/* "new" badge next to Settings when an update is available */
+.nav .count.update { background: var(--accent); }

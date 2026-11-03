@@ -23,6 +23,7 @@ import (
 
 	"delta/internal/config"
 	"delta/internal/engine"
+	"delta/internal/updater"
 )
 
 var ErrNotFound = errors.New("forwarder not found")
@@ -105,6 +106,14 @@ type Manager struct {
 	httpClient    *http.Client
 	WebAddress    string // effective web interface address (command line flags may override the config)
 	Version       string // Delta's version, shown in Settings and returned by /api/session
+
+	// Updater finds and installs new releases (nil = updates unavailable).
+	// Set by main before the web server starts. See update.go.
+	Updater         *updater.Updater
+	updateMu        sync.Mutex // guards update
+	update          updateState
+	checkUpdateNow  chan struct{} // wakes RunUpdateChecker, e.g. when the setting is switched on
+	restartRequests chan string   // path of a freshly installed binary; read by main
 }
 
 func New(configPath string, cfg *config.Config) *Manager {
@@ -113,8 +122,9 @@ func New(configPath string, cfg *config.Config) *Manager {
 	m := &Manager{
 		configPath: configPath, config: cfg, dataDir: dataDir,
 		instances: map[string]*Instance{}, LiveUpdates: bus,
-		Events:     newEventLog(bus),
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+		Events:         newEventLog(bus),
+		httpClient:     &http.Client{Timeout: 10 * time.Second},
+		checkUpdateNow: make(chan struct{}, 1), restartRequests: make(chan string, 1),
 	}
 	// Without a usable log file Delta still runs; the events are then kept in memory only.
 	if err := m.Events.OpenFile(resolveEventLogPath(configPath, cfg.EventLog), cfg.EventLogMaxMB); err != nil {
@@ -650,12 +660,14 @@ func (m *Manager) PostWebhook(url string, payload any) error {
 // SettingsUpdate is the request body of PUT /api/settings. Fields that are
 // left out are not changed.
 type SettingsUpdate struct {
-	WebhookURL       *string `json:"webhook_url,omitempty"`
-	DownAfterSeconds int     `json:"down_after"`
-	EventLog         *string `json:"event_log,omitempty"` // file path, relative to the config file, or "off"
-	EventLogMaxMB    int     `json:"event_log_max_mb"`
-	NewPassword      string  `json:"password,omitempty"`
-	CurrentPassword  string  `json:"current_password,omitempty"`
+	WebhookURL        *string `json:"webhook_url,omitempty"`
+	DownAfterSeconds  int     `json:"down_after"`
+	EventLog          *string `json:"event_log,omitempty"` // file path, relative to the config file, or "off"
+	EventLogMaxMB     int     `json:"event_log_max_mb"`
+	UpdateCheck       *bool   `json:"update_check,omitempty"`
+	UpdateAutoInstall *bool   `json:"update_auto_install,omitempty"`
+	NewPassword       string  `json:"password,omitempty"`
+	CurrentPassword   string  `json:"current_password,omitempty"`
 }
 
 // PasswordHash returns the stored hash ("" if no password is set yet).
@@ -677,6 +689,7 @@ func (m *Manager) SetupDefaults() map[string]any {
 		"session_hours": m.config.SessionHours, "webhook_url": m.config.Alerts.WebhookURL,
 		"down_after": m.config.Alerts.DownAfterSeconds, "event_log": m.config.EventLog,
 		"event_log_max_mb": m.config.EventLogMaxMB, "config_path": m.configPath, "web_addr": m.WebAddress,
+		"update_check": m.config.Updates.Check, "update_auto_install": m.config.Updates.AutoInstall,
 	}
 }
 
@@ -725,6 +738,16 @@ func (m *Manager) CompleteSetup(setup config.InitialSetup) (restartNeeded bool, 
 	if setup.DownAfterSeconds > 0 {
 		m.config.Alerts.DownAfterSeconds = setup.DownAfterSeconds
 	}
+	if setup.UpdateCheck != nil {
+		m.config.Updates.Check = *setup.UpdateCheck
+	}
+	if setup.UpdateAutoInstall != nil {
+		m.config.Updates.AutoInstall = *setup.UpdateAutoInstall
+	}
+	m.config.Updates.AutoInstall = m.config.Updates.AutoInstall && m.config.Updates.Check
+	if m.config.Updates.Check {
+		m.requestUpdateCheck()
+	}
 	m.saveLocked()
 	m.Events.Add("info", "", "", "first-start setup completed")
 	return restartNeeded, nil
@@ -766,6 +789,8 @@ func (m *Manager) Settings() map[string]any {
 		"config_path": m.configPath, "data_dir": m.dataDir, "version": m.Version,
 		"event_log": m.config.EventLog, "event_log_max_mb": m.config.EventLogMaxMB, "event_log_path": m.Events.FilePath(),
 		"port": m.config.Port, "bind": m.config.Bind, "web_addr": m.WebAddress,
+		"update_check": m.config.Updates.Check, "update_auto_install": m.config.Updates.AutoInstall,
+		"update": m.UpdateStatus(), "update_asset": updater.AssetName(),
 	}
 }
 
@@ -806,6 +831,20 @@ func (m *Manager) UpdateSettings(update SettingsUpdate) error {
 	if update.WebhookURL != nil {
 		m.config.Alerts.WebhookURL = strings.TrimSpace(*update.WebhookURL)
 	}
+	if update.UpdateCheck != nil {
+		if *update.UpdateCheck && !m.config.Updates.Check {
+			m.requestUpdateCheck() // switched on: check right away
+		}
+		m.config.Updates.Check = *update.UpdateCheck
+	}
+	if update.UpdateAutoInstall != nil {
+		if *update.UpdateAutoInstall && !m.config.Updates.AutoInstall && m.config.Updates.Check {
+			m.requestUpdateCheck() // switched on: install a release that is already known now
+		}
+		m.config.Updates.AutoInstall = *update.UpdateAutoInstall
+	}
+	// Installing automatically needs the check; never store "auto on, check off".
+	m.config.Updates.AutoInstall = m.config.Updates.AutoInstall && m.config.Updates.Check
 	m.saveLocked()
 	return nil
 }

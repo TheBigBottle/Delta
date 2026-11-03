@@ -296,6 +296,7 @@ All settings and forwarders are in one JSON file, and Delta saves it after every
   "event_log": "delta-events.log",
   "event_log_max_mb": 10,
   "alerts": { "webhook_url": "", "down_after": 30 },
+  "updates": { "check": false, "auto_install": false },
   "forwarders": []
 }
 ```
@@ -311,6 +312,24 @@ Delta appends each event to `event_log` as one syslog-style line, which you can 
 ```
 
 When the file reaches `event_log_max_mb`, Delta renames it with a timestamp, deletes the previous renamed file and starts a new one. At startup it loads the newest 5000 events again. With `"event_log": "off"` the events are kept in memory only.
+
+### Updates
+
+Delta can look for a new release on GitHub and install it. Both switches are off by default, because many Delta servers have no internet access. Set them on the first-start page or under [Settings](#/settings) → Updates:
+
+- **Check for updates**: Delta asks GitHub for the latest release 30 seconds after startup and then once a day. A new version shows a "new" badge next to Settings and an entry in the event log. **Check now** works even while this switch is off.
+- **Install updates automatically**: a new version is installed right after it is found, and Delta restarts. If a capture or replay is running, Delta waits: before the download it tries again an hour later, after the download it restarts as soon as the captures and replays have ended.
+
+A self-built Delta (version `dev`, built without `VERSION`) shows the latest release but is never replaced by it.
+
+To install by hand, click **Install** under Settings → Updates. Delta then:
+
+1. downloads the binary for this machine (for example `delta-linux-arm64`) and rejects it unless it matches the release's `SHA256SUMS`,
+2. runs the new file with `-version` to make sure it starts on this machine,
+3. renames the running binary to `<binary>.old` and moves the new one into its place,
+4. stops all forwarders cleanly and restarts itself with the same command line. Forwarders that were running start again, and everybody has to sign in again.
+
+If something fails, the old binary stays in place and the reason is shown under Settings and in the event log. Delta needs write access to the folder of its binary. A binary in `/usr/local/bin` owned by root cannot update itself (see the README for a systemd setup that can). To go back, stop Delta and rename `<binary>.old` to the original name. Versions before 1.8.0 do not know the `updates` key: if a switch is on, remove the `updates` line from the config file before you start an older version.
 
 ### Command line
 
@@ -351,7 +370,8 @@ curl -u :PASSWORD -X POST 'http://DELTA-HOST:8470/api/forwarders?start=1' \
 | `GET /api/events` | Event log, newest first (`?forwarder=<id>`, `?limit=`) |
 | `GET /api/interfaces` | IP addresses of the Delta machine |
 | `GET /api/export`, `POST /api/import` | Backup and import as `{"forwarders": […]}` |
-| `GET`, `PUT /api/settings` | Alerts, event log file, password |
+| `GET`, `PUT /api/settings` | Alerts, event log file, updates, password |
+| `GET /api/update`, `POST /api/update/check`, `POST /api/update/install` | Update state, check now, install the new version (answers at once, then restarts) |
 | `POST /api/settings/test-webhook` | Send a test message to `{"url": "…"}` |
 | `GET`, `POST /api/captures` | List captures, upload a file |
 | `GET`, `DELETE /api/captures/{name}` | Download or delete a capture |

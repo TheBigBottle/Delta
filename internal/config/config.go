@@ -53,7 +53,15 @@ type Config struct {
 	EventLog      string            `json:"event_log"`
 	EventLogMaxMB int               `json:"event_log_max_mb"`
 	Alerts        AlertConfig       `json:"alerts"`
+	Updates       UpdateConfig      `json:"updates,omitzero"` // omitted while off, so older versions (which refuse unknown keys) still read the file
 	Forwarders    []ForwarderConfig `json:"forwarders"`
+}
+
+// UpdateConfig controls the update check. Both are off by default, because
+// Delta often runs on servers without internet access.
+type UpdateConfig struct {
+	Check       bool `json:"check"`        // look for a new release on GitHub at startup and once a day
+	AutoInstall bool `json:"auto_install"` // install a new release by itself and restart (needs Check)
 }
 
 type AlertConfig struct {
@@ -415,13 +423,15 @@ func ValidateInitialSetup(setup *InitialSetup) error {
 // first settings, entered on the first-start page. Empty or zero fields keep
 // the value from the config file (or its default).
 type InitialSetup struct {
-	Password         string `json:"password"`
-	Port             int    `json:"port"`
-	Bind             string `json:"bind"`
-	DataDir          string `json:"data_dir"`
-	SessionHours     int    `json:"session_hours"`
-	WebhookURL       string `json:"webhook_url"`
-	DownAfterSeconds int    `json:"down_after"`
-	EventLog         string `json:"event_log"`
-	EventLogMaxMB    int    `json:"event_log_max_mb"`
+	Password          string `json:"password"`
+	Port              int    `json:"port"`
+	Bind              string `json:"bind"`
+	DataDir           string `json:"data_dir"`
+	SessionHours      int    `json:"session_hours"`
+	WebhookURL        string `json:"webhook_url"`
+	DownAfterSeconds  int    `json:"down_after"`
+	EventLog          string `json:"event_log"`
+	EventLogMaxMB     int    `json:"event_log_max_mb"`
+	UpdateCheck       *bool  `json:"update_check"`        // nil = keep the config file's value
+	UpdateAutoInstall *bool  `json:"update_auto_install"` // nil = keep the config file's value
 }

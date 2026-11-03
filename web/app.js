@@ -296,6 +296,9 @@ const state = {
   selectedIds: new Set(),       // list view: checked rows for bulk actions
   currentPage: null,            // hooks of the visible page (see top of file)
   liveStream: null,             // EventSource of /api/stream
+  updateStatus: null,           // state of the update check (GET /api/update, "update" live events)
+  isWaitingForRestart: false,   // an update is being installed; see waitForRestart
+  connectionLostAt: 0,          // when the live stream last dropped (Date.now()); a restart always drops it
   isConnected: true,
   localAddresses: null,         // IP addresses of the Delta machine (bind address dropdown); null = not loaded yet
 };
@@ -342,18 +345,82 @@ function connectLiveStream() {
     receiveForwarderList(JSON.parse(message.data));
   });
   stream.addEventListener('event', message => state.currentPage?.onEvent?.(JSON.parse(message.data)));
+  stream.addEventListener('update', message => receiveUpdateStatus(JSON.parse(message.data)));
   stream.onerror = async () => {
     setConnected(false);
     if (stream.readyState === EventSource.CLOSED) {
+      // Still logged in? Then retry. A 401 means the session is gone, e.g.
+      // because Delta restarted (sessions live in memory): show the login form.
       try {
-        await apiRequest('GET', '/api/session'); // still logged in? then retry
-        setTimeout(connectLiveStream, 2000);
-      } catch { /* not logged in: onSessionExpired shows the login form */ }
+        const response = await fetch('/api/session', { credentials: 'same-origin' });
+        if (response.status === 401) return onSessionExpired();
+      } catch { /* server unreachable right now: retry below */ }
+      setTimeout(connectLiveStream, 2000);
     }
   };
 }
 
+// Stores a new state of the update check: shows the "update available" badge
+// in the sidebar, refreshes the Settings page, and when Delta restarts into a
+// new version, reloads the page once the new version answers.
+function receiveUpdateStatus(status) {
+  if (!status) return;
+  const previousState = state.updateStatus?.state;
+  state.updateStatus = status;
+  const badge = $('#nav-update');
+  if (badge) {
+    const showBadge = status.available && status.state !== 'restarting';
+    badge.classList.toggle('hidden', !showBadge);
+    badge.title = showBadge ? `Delta ${status.latest} is available (running ${status.current}). Install it under Settings → Updates` : '';
+  }
+  state.currentPage?.onUpdateStatus?.(status);
+  // Start waiting as soon as the install runs: the "restarting" event itself
+  // often does not reach the browser, because Delta shuts down right after it.
+  const isInstalling = ['installing', 'pending', 'restarting'].includes(status.state);
+  if (isInstalling && !state.isWaitingForRestart) waitForRestart(status);
+}
+
+// After an update Delta replaces itself and starts again within a second or
+// two. Sessions live in memory, so the restart logs everybody out: a 401 (or
+// a different version) means the new process is up, and the page reloads.
+function waitForRestart(status) {
+  state.isWaitingForRestart = true;
+  const startedWaitingAt = Date.now();
+  let lastProgressAt = startedWaitingAt;
+  const stopWaiting = () => { clearInterval(timer); state.isWaitingForRestart = false; };
+  const timer = setInterval(async () => {
+    if (state.updateStatus?.state === 'idle') return stopWaiting(); // the install failed; Settings shows why
+    try {
+      const response = await fetch('/api/session', { credentials: 'same-origin' });
+      const session = response.ok ? await response.json() : null;
+      // A 401 alone may just be an expired session while the old version is
+      // still downloading. Only after the live stream dropped (Delta went
+      // away) does it mean the new version is up.
+      const restarted = state.connectionLostAt >= startedWaitingAt;
+      if (response.status === 401 && !restarted) {
+        stopWaiting();
+        onSessionExpired();
+        return;
+      }
+      if (response.status === 401 || (session && session.version !== status.current)) {
+        stopWaiting();
+        // Shown on the login form after the reload (see showEntryPage).
+        try { sessionStorage.setItem('delta-login-message', `Delta was updated to ${status.latest}. Please sign in again.`); } catch { /* ignore */ }
+        location.reload();
+        return;
+      }
+    } catch { /* server is restarting right now */ }
+    // While "pending" (installed, restart waits for a capture or replay to end) there is no time limit.
+    if (state.updateStatus?.state === 'pending') lastProgressAt = Date.now();
+    if (Date.now() - lastProgressAt > 10 * 60 * 1000) { // the download may take a while on a slow link
+      stopWaiting();
+      showToast('Delta did not come back after the update. Check the server and the event log.', 'error');
+    }
+  }, 1000);
+}
+
 function setConnected(connected) {
+  if (!connected) state.connectionLostAt = Date.now();
   if (state.isConnected === connected) return;
   state.isConnected = connected;
   $('#connection-lost')?.classList.toggle('hidden', connected);
@@ -688,6 +755,13 @@ function renderSetupPage(defaults = {}) {
           <label class="f" title="A forwarder that failed to start or has a disconnected endpoint for this long raises an alert">Alert when a forwarder is down for (s)<input type="number" name="downAfter" min="1" step="1" value="${value('down_after')}" style="max-width:160px"></label>
         </div>
 
+        <div class="sect">
+          <div class="sect-t">${icon('download')}Updates</div>
+          <label class="chk" title="Ask GitHub for a new Delta release shortly after startup and once a day. Needs internet access; nothing is sent except the request itself"><input type="checkbox" name="updateCheck" ${defaults.update_check ? 'checked' : ''}> Check for updates</label>
+          <label class="chk" title="Download, verify and install a new release by itself, then restart Delta. Forwarders are back within seconds"><input type="checkbox" name="updateAutoInstall" ${defaults.update_auto_install ? 'checked' : ''} ${defaults.update_check ? '' : 'disabled'}> Install updates automatically</label>
+          <div class="hint faint">Off by default, for servers without internet access. You can check and install by hand under Settings at any time.</div>
+        </div>
+
         <button class="btn primary" title="Save the password and these settings, then open Delta">Save &amp; start</button>
         <div class="form-err" style="text-align:center;margin:0"></div>
       </form>
@@ -695,6 +769,11 @@ function renderSetupPage(defaults = {}) {
     </div>`;
   const form = $('form', appRoot);
   const showFormError = text => { $('.form-err', form).textContent = text; };
+  // Automatic install only makes sense while the check is on.
+  form.updateCheck.onchange = () => {
+    form.updateAutoInstall.disabled = !form.updateCheck.checked;
+    if (!form.updateCheck.checked) form.updateAutoInstall.checked = false;
+  };
   form.onsubmit = async event => {
     event.preventDefault();
     if (form.password.value.length < 8) return showFormError('The password must have at least 8 characters.');
@@ -712,6 +791,8 @@ function renderSetupPage(defaults = {}) {
         event_log_max_mb: Number(form.eventLogMaxMB.value) || 0,
         webhook_url: form.webhook.value.trim(),
         down_after: Number(form.downAfter.value) || 0,
+        update_check: form.updateCheck.checked,
+        update_auto_install: form.updateCheck.checked && form.updateAutoInstall.checked,
       });
       startApp();
       if (result.restart_needed) showToast('Settings saved. The new web port / address takes effect after Delta restarts.');
@@ -725,6 +806,11 @@ function renderSetupPage(defaults = {}) {
 // Decides what to show when the page loads or the session ends:
 // the setup page (no password yet), the login form, or the app.
 async function showEntryPage(loginMessage = '') {
+  // A message left before a reload, e.g. "Delta was updated" (see waitForRestart).
+  try {
+    loginMessage = sessionStorage.getItem('delta-login-message') || loginMessage;
+    sessionStorage.removeItem('delta-login-message');
+  } catch { /* storage blocked: no message */ }
   try {
     const setup = await apiRequest('GET', '/api/setup');
     if (setup.setup_required) return renderSetupPage(setup.defaults);
@@ -756,7 +842,7 @@ function renderAppLayout() {
           <a href="#/" data-nav="list" title="All forwarders with their live state">${icon('layers')}<span>Forwarders</span><span class="count hidden" id="nav-issue-count" title="Forwarders with a problem"></span></a>
           <a href="#/events" data-nav="events" title="Log of connections, state changes, errors and alerts">${icon('bell')}<span>Events</span></a>
           <a href="#/captures" data-nav="captures" title="Recorded traffic: download it or replay it into a forwarder">${icon('disc')}<span>Captures</span></a>
-          <a href="#/settings" data-nav="settings" title="Alerts, password, backup and import">${icon('sliders')}<span>Settings</span></a>
+          <a href="#/settings" data-nav="settings" title="Alerts, updates, password, backup and import">${icon('sliders')}<span>Settings</span><span class="count update hidden" id="nav-update">new</span></a>
           <a href="#/help" data-nav="help" title="How Delta works (shortcut: ?)">${icon('help')}<span>Help</span></a>
         </nav>
         <div class="side-foot">
@@ -839,6 +925,7 @@ async function startApp() {
   try {
     receiveForwarderList(await apiRequest('GET', '/api/forwarders'));
   } catch (error) { showError(error); }
+  apiRequest('GET', '/api/update').then(receiveUpdateStatus).catch(() => {});
   connectLiveStream();
   window.onhashchange = showPageForUrl;
   showPageForUrl();
@@ -2711,6 +2798,19 @@ function renderSettingsPage(main) {
         </form>
       </div>
       <div class="stack">
+        <form class="card" id="update-settings">
+          <div class="card-h">${icon('download')}<h2>Updates</h2></div>
+          <div class="card-b stack">
+            <label class="chk" title="Ask GitHub for a new Delta release shortly after startup and once a day. Needs internet access"><input type="checkbox" name="updateCheck" ${settings.update_check ? 'checked' : ''}> Check for updates at startup and once a day</label>
+            <label class="chk" title="Download, verify and install a new release by itself, then restart Delta. Waits while a capture or replay is running"><input type="checkbox" name="updateAutoInstall" ${settings.update_auto_install ? 'checked' : ''} ${settings.update_check ? '' : 'disabled'}> Install new versions automatically and restart</label>
+            <div id="update-status"></div>
+            <div class="row">
+              <button type="button" class="btn" id="update-check-now" title="Ask GitHub for the latest release now (works even when the automatic check is off)">Check now</button>
+              <button type="button" class="btn primary hidden" id="update-install" title="Download the new version, verify its checksum, replace the binary and restart Delta"></button>
+            </div>
+            <span class="hint faint">Installs <code>${escapeHtml(settings.update_asset)}</code> from the GitHub release after checking it against <code>SHA256SUMS</code>. The running binary is kept as <code>.old</code>. Delta needs write access to the folder of its binary.</span>
+          </div>
+        </form>
         <div class="card">
           <div class="card-h">${icon('download')}<h2>Backup</h2></div>
           <div class="card-b stack">
@@ -2767,8 +2867,62 @@ function renderSettingsPage(main) {
         .then(() => { showToast('Password changed'); form.reset(); }).catch(showError);
     };
     $('#import-button', main).onclick = importForwardersFromFile;
+
+    // ---- updates ----
+    const updateForm = $('#update-settings', main);
+    const saveUpdateSettings = () => {
+      updateForm.updateAutoInstall.disabled = !updateForm.updateCheck.checked;
+      if (!updateForm.updateCheck.checked) updateForm.updateAutoInstall.checked = false;
+      apiRequest('PUT', '/api/settings', {
+        update_check: updateForm.updateCheck.checked,
+        update_auto_install: updateForm.updateCheck.checked && updateForm.updateAutoInstall.checked,
+      }).then(() => showToast('Update settings saved')).catch(showError);
+    };
+    updateForm.updateCheck.onchange = saveUpdateSettings;
+    updateForm.updateAutoInstall.onchange = saveUpdateSettings;
+    $('#update-check-now', main).onclick = () => apiRequest('POST', '/api/update/check')
+      .then(status => {
+        receiveUpdateStatus(status);
+        if (!status.available) showToast(`Delta ${status.current} is the latest version`);
+      }).catch(showError);
+    $('#update-install', main).onclick = () => {
+      const latest = state.updateStatus?.latest;
+      askConfirmation(`Install Delta ${latest}?`,
+        'Delta downloads the new version, checks it, replaces its binary and restarts. Forwarders stop for a moment and start again by themselves. Running captures and replays end (captures are saved). Everybody has to sign in again afterwards.',
+        'Install & restart', false).then(confirmed => {
+        if (confirmed) apiRequest('POST', '/api/update/install').then(receiveUpdateStatus).catch(showError);
+      });
+    };
+    // Fresh from the server; it wins over the copy kept from live events.
+    receiveUpdateStatus(settings.update);
   }).catch(showError);
-  return {};
+
+  // The status line and the install button of the Updates card.
+  function showUpdateStatus(status) {
+    const statusBox = $('#update-status', main);
+    if (!statusBox || !status) return;
+    const checked = status.checked_at ? `last checked ${timeAgo(status.checked_at)}` : 'not checked yet';
+    let html;
+    if (status.state === 'checking') html = `<span class="muted">Checking GitHub for a new release…</span>`;
+    else if (status.state === 'installing') html = `<span class="muted">Downloading and installing Delta ${escapeHtml(status.latest)}…</span>`;
+    else if (status.state === 'pending') html = `<span class="muted">Delta ${escapeHtml(status.latest)} is installed. Delta restarts as soon as the running captures and replays have ended.</span>`;
+    else if (status.state === 'restarting') html = `<span class="muted">Delta ${escapeHtml(status.latest)} installed. Restarting…</span>`;
+    else if (status.available) html = `<b>Delta ${escapeHtml(status.latest)} is available</b> <span class="muted">(running ${escapeHtml(status.current)}, ${checked})</span>`
+      + (status.release_url ? ` · <a href="${escapeHtml(status.release_url)}" target="_blank" rel="noopener" title="What is new in this release (opens GitHub)">release notes</a>` : '');
+    else if (status.development) html = `<span class="muted">Self-built version (${escapeHtml(status.current)}): it is never replaced by a release.${status.latest ? ` Latest release: ${escapeHtml(status.latest)} (${checked}).` : ''}</span>`;
+    else if (status.latest) html = `<span class="muted">Delta ${escapeHtml(status.current)} is up to date (${checked})</span>`;
+    else html = `<span class="muted">Running Delta ${escapeHtml(status.current)}, ${checked}</span>`;
+    if (status.error) html += `<div class="form-err" style="margin:6px 0 0" title="The reason the last check or install failed">${escapeHtml(status.error)}</div>`;
+    setHtmlIfChanged(statusBox, html);
+
+    const busy = status.state !== 'idle';
+    const installButton = $('#update-install', main);
+    installButton.classList.toggle('hidden', !status.available);
+    installButton.textContent = `Install ${status.latest || ''}`;
+    installButton.disabled = busy;
+    $('#update-check-now', main).disabled = busy;
+  }
+  return { onUpdateStatus: showUpdateStatus };
 }
 
 /* ================= start ================= */

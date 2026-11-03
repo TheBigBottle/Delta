@@ -8,10 +8,11 @@
 # Usage (from anywhere; the binaries land in the project folder):
 #   scripts/build.sh                 build ./delta for this machine
 #   scripts/build.sh --skip-tests    build without running the tests
-#   scripts/build.sh --all           also cross-compile for common Linux platforms into dist/
+#   scripts/build.sh --all           also cross-compile for common Linux platforms into dist/,
+#                                    plus dist/SHA256SUMS (the self-update refuses a release without it)
 #
 # Environment variables:
-#   VERSION=1.2.0 scripts/build.sh   embed a version number (shown by "delta -version")
+#   VERSION=1.2.0 scripts/build.sh   embed a version number (shown by "delta -version"; a leading "v" is dropped)
 set -euo pipefail
 
 cd "$(dirname "$0")/.." # always build from the project folder (this script is in scripts/)
@@ -22,7 +23,7 @@ for arg in "$@"; do
   case "$arg" in
     --skip-tests) run_tests=false ;;
     --all) build_all=true ;;
-    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg (see --help)" >&2; exit 1 ;;
   esac
 done
@@ -35,7 +36,9 @@ fi
 # -s -w strip debug information (smaller binary); -X sets the version variable in main.go.
 ldflags="-s -w"
 if [[ -n "${VERSION:-}" ]]; then
-  ldflags="$ldflags -X main.version=$VERSION"
+  # "v1.8.0" (the tag name) becomes "1.8.0": the self-update compares the
+  # output of "delta -version" with the release tag without its "v".
+  ldflags="$ldflags -X main.version=${VERSION#v}"
 fi
 
 echo "==> Checking formatting"
@@ -72,6 +75,10 @@ if $build_all; then
   build linux arm64 "" dist/delta-linux-arm64 # e.g. Raspberry Pi 4/5 with 64-bit OS
   build linux arm 7 dist/delta-linux-armv7    # e.g. Raspberry Pi with 32-bit OS
   build linux 386 "" dist/delta-linux-386
+  # Checksums for the release; the self-update verifies the download against this file.
+  rm -f dist/SHA256SUMS
+  (cd dist && sha256sum delta-linux-* > SHA256SUMS)
+  echo "    dist/SHA256SUMS"
 fi
 
 echo "==> Done. Start with: ./delta -config delta.json"

@@ -33,6 +33,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -307,8 +308,14 @@ type outputRuntime struct {
 	endpointRuntime
 	queue         chan []byte   // udp-send
 	connectQueues []chan []byte // tcp-connect
-	clientsMu     sync.RWMutex
-	clients       map[*outputClient]struct{} // tcp-listen
+	isListen      bool          // tcp-listen: the messages go to the clients below
+
+	// clients is the list of connected tcp-listen clients. It is copy-on-write:
+	// Dispatch only loads the pointer, so the input goroutines (one per input
+	// connection) never wait on a lock or on each other. A connect or
+	// disconnect replaces the whole list under clientsMu.
+	clients   atomic.Pointer[[]*outputClient]
+	clientsMu sync.Mutex // serializes addClient/removeClient only
 }
 
 type outputClient struct {
@@ -318,14 +325,14 @@ type outputClient struct {
 
 // enqueue hands a message to the output without ever blocking the caller.
 func (out *outputRuntime) enqueue(message []byte) {
-	if out.clients != nil {
-		out.clientsMu.RLock()
-		for client := range out.clients {
-			if !enqueueDropOldest(client.queue, message) {
-				out.dropCount.Add(1)
+	if out.isListen {
+		if clients := out.clients.Load(); clients != nil {
+			for _, client := range *clients {
+				if !enqueueDropOldest(client.queue, message) {
+					out.dropCount.Add(1)
+				}
 			}
 		}
-		out.clientsMu.RUnlock()
 		return
 	}
 	if out.connectQueues != nil {
@@ -339,6 +346,31 @@ func (out *outputRuntime) enqueue(message []byte) {
 	if !enqueueDropOldest(out.queue, message) {
 		out.dropCount.Add(1)
 	}
+}
+
+// addClient adds a tcp-listen client; it receives every message from now on.
+func (out *outputRuntime) addClient(client *outputClient) {
+	out.clientsMu.Lock()
+	defer out.clientsMu.Unlock()
+	var current []*outputClient
+	if loaded := out.clients.Load(); loaded != nil {
+		current = *loaded
+	}
+	// A fresh slice: goroutines in Dispatch may still be reading the old one.
+	updated := append(slices.Clip(current), client)
+	out.clients.Store(&updated)
+}
+
+// removeClient removes a tcp-listen client (copy-on-write, see clients).
+func (out *outputRuntime) removeClient(client *outputClient) {
+	out.clientsMu.Lock()
+	defer out.clientsMu.Unlock()
+	loaded := out.clients.Load()
+	if loaded == nil {
+		return
+	}
+	updated := slices.DeleteFunc(slices.Clone(*loaded), func(each *outputClient) bool { return each == client })
+	out.clients.Store(&updated)
 }
 
 // enqueueDropOldest puts message into queue. If the queue is full, the oldest
@@ -363,43 +395,53 @@ func enqueueDropOldest(queue chan []byte, message []byte) bool {
 
 // tapHub distributes copies of the passing data to watchers (the live
 // inspector and captures). It costs nothing while nobody watches: Dispatch
-// only checks one atomic counter.
+// only loads one atomic pointer. The watcher list is copy-on-write, so
+// several input goroutines can publish at the same time without a lock.
 type tapHub struct {
-	watcherCount atomic.Int32
-	mu           sync.Mutex
-	watchers     map[chan TappedMessage]struct{}
+	watchers atomic.Pointer[[]chan TappedMessage] // nil or empty = nobody watches
+	mu       sync.Mutex                           // serializes subscribe/unsubscribe only
 }
 
-func (hub *tapHub) hasWatchers() bool { return hub.watcherCount.Load() > 0 }
+func (hub *tapHub) hasWatchers() bool {
+	watchers := hub.watchers.Load()
+	return watchers != nil && len(*watchers) > 0
+}
 
 func (hub *tapHub) subscribe(bufferSize int) chan TappedMessage {
 	ch := make(chan TappedMessage, bufferSize)
 	hub.mu.Lock()
-	if hub.watchers == nil {
-		hub.watchers = map[chan TappedMessage]struct{}{}
+	defer hub.mu.Unlock()
+	var current []chan TappedMessage
+	if loaded := hub.watchers.Load(); loaded != nil {
+		current = *loaded
 	}
-	hub.watchers[ch] = struct{}{}
-	hub.watcherCount.Store(int32(len(hub.watchers)))
-	hub.mu.Unlock()
+	updated := append(slices.Clip(current), ch)
+	hub.watchers.Store(&updated)
 	return ch
 }
 
 func (hub *tapHub) unsubscribe(ch chan TappedMessage) {
 	hub.mu.Lock()
-	delete(hub.watchers, ch)
-	hub.watcherCount.Store(int32(len(hub.watchers)))
-	hub.mu.Unlock()
+	defer hub.mu.Unlock()
+	loaded := hub.watchers.Load()
+	if loaded == nil {
+		return
+	}
+	updated := slices.DeleteFunc(slices.Clone(*loaded), func(each chan TappedMessage) bool { return each == ch })
+	hub.watchers.Store(&updated)
 }
 
 func (hub *tapHub) publish(message TappedMessage) {
-	hub.mu.Lock()
-	for ch := range hub.watchers {
+	watchers := hub.watchers.Load()
+	if watchers == nil {
+		return
+	}
+	for _, ch := range *watchers {
 		select {
 		case ch <- message:
 		default: // a slow watcher misses messages instead of slowing down forwarding
 		}
 	}
-	hub.mu.Unlock()
 }
 
 // Forwarder is one running forwarder instance. It is created by
@@ -485,7 +527,7 @@ func Start(forwarderConfig config.ForwarderConfig, logEvent func(level, message 
 				return abort(fmt.Errorf("output %d: %w", i+1, err))
 			}
 			openedSockets = append(openedSockets, listener)
-			out.clients = map[*outputClient]struct{}{}
+			out.isListen = true
 			workerFuncs = append(workerFuncs, func() { fw.runTCPListenOutput(out, listener) })
 		case "tcp-connect":
 			// Every remote host gets its own queue, so one host that is down
@@ -559,7 +601,12 @@ func (fw *Forwarder) runRecovering(fn func()) {
 // through here and is handed to all outputs (and to the taps, if watched).
 func (fw *Forwarder) Dispatch(message []byte, source string) {
 	now := time.Now().UnixNano()
-	fw.lastDataAt.Store(now)
+	// Many input goroutines may dispatch at once. Writing a shared cache line
+	// on every message makes the CPUs fight over it, so lastDataAt (only
+	// shown with millisecond precision) is written at most once per millisecond.
+	if now-fw.lastDataAt.Load() >= int64(time.Millisecond) {
+		fw.lastDataAt.Store(now)
+	}
 	fw.input.byteCount.Add(uint64(len(message)))
 	fw.input.messageCount.Add(1)
 	for _, out := range fw.outputs {
@@ -872,17 +919,13 @@ func (fw *Forwarder) runTCPListenOutput(out *outputRuntime, listener net.Listene
 			queue: make(chan []byte, out.config.QueueSizeOr(defaultClientQueue)),
 			peer:  out.addPeer(conn.RemoteAddr().String(), conn),
 		}
-		out.clientsMu.Lock()
-		out.clients[client] = struct{}{}
-		out.clientsMu.Unlock()
+		out.addClient(client)
 
 		fw.runConnection(func() {
 			disableNagle(conn)
 			fw.logEvent("info", label+": client "+client.peer.Remote+" connected")
 			err := fw.writeQueueToConn(conn, client.queue, &out.endpointRuntime, client.peer)
-			out.clientsMu.Lock()
-			delete(out.clients, client)
-			out.clientsMu.Unlock()
+			out.removeClient(client)
 			conn.Close()
 			out.removePeer(client.peer)
 			fw.logEventUnlessStopping("info", label+": client "+client.peer.Remote+" disconnected ("+describeNetError(err)+")")

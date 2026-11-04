@@ -1362,12 +1362,11 @@ function endpointFormFields(endpoint, path, direction) {
     const defaultQueue = endpoint.mode === 'tcp-listen' ? '1024 per client' : '10000';
     modeSpecificFields += `<label class="f" title="How many messages may wait for a slow or disconnected receiver. When full, the oldest are dropped">Queue (messages)<input type="number" min="0" data-path="${path}.queue" value="${endpoint.queue || ''}" placeholder="${defaultQueue}"></label>`;
   }
-  // tcp-connect: more remote hosts besides the one above, one connection each.
+  // tcp-connect input: more remote hosts besides the one above, one connection
+  // each. Outputs have no extra hosts; another output does the same job.
   let additionalHostsHtml = '';
-  if (endpoint.mode === 'tcp-connect') {
-    const hint = direction === 'input'
-      ? 'Delta connects to every host and merges what they send'
-      : 'Delta connects to every host and sends each one a copy (each with its own buffer)';
+  if (endpoint.mode === 'tcp-connect' && direction === 'input') {
+    const hint = 'Delta connects to every host and merges what they send';
     const rows = (endpoint.targets || []).map((target, index) => `
       <div class="target-row">
         <label class="f" title="Hostname or IP address of another remote device">Host ${index + 2}<input data-path="${path}.targets.${index}.host" value="${escapeHtml(target.host || '')}" placeholder="hostname or IP" required></label>
@@ -1498,8 +1497,8 @@ function openForwarderEditor(existing) {
       draft.outputs.push({ mode: 'udp-send', host: '', port: (lastOutput?.port || 10110) + 1 });
       renderEndpointFields();
     }
-    // Additional hosts of a tcp-connect endpoint. data-*-target holds the
-    // endpoint's path: "input" or "outputs.<index>".
+    // Additional hosts of a tcp-connect input. data-*-target holds the
+    // endpoint's path ("input"); only the input offers them.
     const endpointAtPath = path => (path === 'input' ? draft.input : draft.outputs[Number(path.split('.')[1])]);
     const addTargetButton = target.closest('[data-add-target]');
     if (addTargetButton) {

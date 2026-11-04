@@ -290,10 +290,10 @@ func TestLatency(t *testing.T) {
 		lat[len(lat)/2], lat[len(lat)*99/100], lat[len(lat)-1])
 }
 
-// A tcp-connect input with several remote hosts merges their data, and a
-// tcp-connect output with several hosts sends a copy to each. A host that is
-// down makes the endpoint "partial", buffers its own data and gets it once it
-// is back, without holding back the other host.
+// A tcp-connect input with several remote hosts merges their data. An
+// output target that is down buffers its own data and gets it once it is
+// back, without holding back the other output. (Outputs had extra hosts until
+// 1.9.0; Normalize now turns them into separate outputs, which this checks too.)
 func TestMultipleConnectTargets(t *testing.T) {
 	listen := func() (net.Listener, int) {
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -326,7 +326,10 @@ func TestMultipleConnectTargets(t *testing.T) {
 	}
 	sourceAConn, sourceBConn, targetAConn := accept(sourceA), accept(sourceB), accept(targetA)
 	waitFor(t, "both input hosts connected", func() bool { return fw.input.snapshot(false).State == "connected" })
-	waitFor(t, "output partially connected", func() bool { return fw.outputs[0].snapshot(false).State == "partial" })
+	if len(fw.outputs) != 2 {
+		t.Fatalf("the output's extra host was not split into its own output: %d outputs", len(fw.outputs))
+	}
+	waitFor(t, "first output connected", func() bool { return fw.outputs[0].snapshot(false).State == "connected" })
 
 	sourceAConn.Write([]byte("$A*00\n"))
 	sourceBConn.Write([]byte("$B*00\n"))
@@ -358,8 +361,8 @@ func TestMultipleConnectTargets(t *testing.T) {
 	if got := readTwoLines(targetBConn); strings.Join(got, "") != "$A*00\n$B*00\n" {
 		t.Fatalf("target B got %q", got)
 	}
-	waitFor(t, "output fully connected", func() bool { return fw.outputs[0].snapshot(false).State == "connected" })
-	if status := fw.outputs[0].snapshot(false); len(status.Connections) != 2 || status.PeerCount != 2 {
-		t.Fatalf("status: %+v", status)
+	waitFor(t, "second output connected", func() bool { return fw.outputs[1].snapshot(false).State == "connected" })
+	if status := fw.input.snapshot(false); len(status.Connections) != 2 || status.PeerCount != 2 {
+		t.Fatalf("input status: %+v", status)
 	}
 }

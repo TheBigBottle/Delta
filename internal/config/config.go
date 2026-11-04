@@ -100,8 +100,9 @@ type EndpointConfig struct {
 	// removed" error from validate instead of "unknown field". Never written.
 	LegacyHello         string `json:"hello,omitempty"`
 	LegacyHelloInterval int    `json:"hello_interval,omitempty"`
-	// tcp-connect only: more remote hosts besides Host:Port. Delta keeps one
-	// connection to each; an input merges their data, an output sends a copy to each.
+	// tcp-connect inputs only: more remote hosts besides Host:Port. Delta keeps
+	// one connection to each and merges their data. Outputs had this option
+	// until 1.9.0; Normalize turns their extra hosts into separate outputs.
 	Targets []RemoteTarget `json:"targets,omitempty"`
 }
 
@@ -253,10 +254,30 @@ func (fc *ForwarderConfig) Normalize() error {
 			return fmt.Errorf("output %d: %w", i+1, err)
 		}
 	}
+	fc.Outputs = splitOutputTargets(fc.Outputs)
 	if fc.Created.IsZero() {
 		fc.Created = time.Now().UTC()
 	}
 	return nil
+}
+
+// splitOutputTargets turns every extra host of a tcp-connect output into an
+// output of its own, with the same label and queue size. Outputs could have
+// extra hosts until 1.9.0; each host already had its own connection and
+// buffer, so config files and backups from then keep working the same way.
+func splitOutputTargets(outputs []EndpointConfig) []EndpointConfig {
+	result := make([]EndpointConfig, 0, len(outputs))
+	for _, output := range outputs {
+		extraHosts := output.Targets
+		output.Targets = nil
+		result = append(result, output)
+		for _, extraHost := range extraHosts {
+			separateOutput := output
+			separateOutput.Host, separateOutput.Port = extraHost.Host, extraHost.Port
+			result = append(result, separateOutput)
+		}
+	}
+	return result
 }
 
 func defaultConfig() *Config {

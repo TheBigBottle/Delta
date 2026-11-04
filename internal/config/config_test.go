@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -51,5 +52,34 @@ func TestRemovedUDPConnectMode(t *testing.T) {
 	_, err := Load(path)
 	if err == nil || !strings.Contains(err.Error(), "no longer supported") {
 		t.Fatalf("error = %v, want the removed-mode message", err)
+	}
+}
+
+// Extra hosts of a tcp-connect output (possible until 1.9.0) become separate
+// outputs with the same label and queue; an input keeps its extra hosts.
+func TestOutputTargetsBecomeSeparateOutputs(t *testing.T) {
+	forwarder := ForwarderConfig{
+		Name:  "split",
+		Input: EndpointConfig{Mode: "tcp-connect", Host: "10.0.0.1", Port: 4001, Targets: []RemoteTarget{{Host: "10.0.0.2", Port: 4001}}},
+		Outputs: []EndpointConfig{
+			{Mode: "tcp-connect", Name: "plotter", Host: "10.0.0.5", Port: 10110, QueueSize: 50,
+				Targets: []RemoteTarget{{Host: " 10.0.0.6 ", Port: 10111}, {Host: "10.0.0.7", Port: 10112}}},
+			{Mode: "udp-send", Host: "10.0.0.8", Port: 10113},
+		},
+	}
+	if err := forwarder.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	want := []EndpointConfig{
+		{Mode: "tcp-connect", Name: "plotter", Host: "10.0.0.5", Port: 10110, QueueSize: 50},
+		{Mode: "tcp-connect", Name: "plotter", Host: "10.0.0.6", Port: 10111, QueueSize: 50},
+		{Mode: "tcp-connect", Name: "plotter", Host: "10.0.0.7", Port: 10112, QueueSize: 50},
+		{Mode: "udp-send", Host: "10.0.0.8", Port: 10113},
+	}
+	if !reflect.DeepEqual(forwarder.Outputs, want) {
+		t.Fatalf("outputs:\n got %+v\nwant %+v", forwarder.Outputs, want)
+	}
+	if len(forwarder.Input.Targets) != 1 {
+		t.Fatalf("input targets were changed: %+v", forwarder.Input.Targets)
 	}
 }

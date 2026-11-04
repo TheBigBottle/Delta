@@ -204,11 +204,11 @@ A forwarder without an `id` gets one automatically.
 | Mode | As input | As output |
 |---|---|---|
 | `tcp-listen` | Any number of sources connect to Delta (up to `max_clients`) and their data is merged | Clients connect and receive the data (`max_clients`, `queue` per client) |
-| `tcp-connect` | Delta connects to a source and reconnects automatically. Data from more sources in `targets` is merged | Delta connects to a target, reconnects, and buffers up to `queue` messages while it is down. Each extra host in `targets` gets its own copy and buffer |
+| `tcp-connect` | Delta connects to a source and reconnects automatically. Data from more sources in `targets` is merged | Delta connects to a target, reconnects, and buffers up to `queue` messages while it is down |
 | `udp-listen` | Receives datagrams on a port, from any sender | (input only) |
 | `udp-send` | (output only) | Sends datagrams to a host |
 
-`targets` (tcp-connect only) lists more remote hosts besides `host`/`port`, e.g. `"targets": [{"host": "10.0.0.6", "port": 4001}]`. Delta keeps one connection to each. While only some of them are connected, the endpoint state is `partial`.
+`targets` (tcp-connect inputs only) lists more remote hosts besides `host`/`port`, e.g. `"targets": [{"host": "10.0.0.6", "port": 4001}]`. Delta keeps one connection to each. While only some of them are connected, the input state is `partial`. Outputs had `targets` up to version 1.9.0 and no longer do: to send to several hosts, add one output per host. A config file or backup with `targets` on an output still loads; each extra host becomes an output of its own with the same label and queue.
 
 In listen modes `host` is the bind address. Empty means all interfaces, and the editor offers the machine's IP addresses in a dropdown. In the other modes `host` is the remote host.
 

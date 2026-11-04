@@ -133,9 +133,9 @@ The devices connect to Delta, and Delta sends each sentence as a UDP datagram to
 }
 ```
 
-### Several hosts in one endpoint
+### Several hosts in one input
 
-In **TCP connect** mode, the **Add host** button adds more hosts. For an input, Delta merges what all the hosts send. For an output, each host gets its own copy. If only some of the hosts are connected, the endpoint shows *partial* and the forwarder counts as degraded.
+When the input is in **TCP connect** mode, the **Add host** button adds more hosts, and Delta merges what all of them send. If only some of the hosts are connected, the input shows *partial* and the forwarder counts as degraded. To send data to several hosts, add one output per host with **Add output**.
 
 ```json
 "input": {

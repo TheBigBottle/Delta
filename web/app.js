@@ -2093,19 +2093,89 @@ const PREVIEW_SIZE_SELECT = selected => `
   <select data-role="preview-size" title="How much of each message is transferred to the browser. Larger values show more of long messages (bit streams) but need more bandwidth">
     ${[[256, '256 B'], [1024, '1 KB'], [4096, '4 KB'], [16384, '16 KB']].map(([value, label]) => `<option value="${value}" ${value === selected ? 'selected' : ''}>Preview ${label}</option>`).join('')}
   </select>`;
+const COLUMN_RESIZE_HANDLE = column => `<span class="col-resize" data-resize-column="${column}" title="Drag to change the width of this column. Double-click to reset it"></span>`;
 const MESSAGE_LIST_HEADER = timeHint => `
   <div class="ir ir-head">
-    <span title="${timeHint}">Time</span>
-    <span class="sr" title="Address of the sender (IP:port)">Source</span>
-    <span class="ln" title="Size of the message in bytes">Bytes</span>
+    <span title="${timeHint}">Time${COLUMN_RESIZE_HANDLE('time')}</span>
+    <span class="sr" title="Address of the sender (IP:port)">Source${COLUMN_RESIZE_HANDLE('source')}</span>
+    <span class="ln" title="Size of the message in bytes">Bytes${COLUMN_RESIZE_HANDLE('bytes')}</span>
     <span title="Content of the message">Data</span>
   </div>`;
+
+// Column widths of the message list (in px) that can be changed by dragging
+// the handles in the header. Stored per browser and shared by the live
+// inspector and the capture viewer.
+const MESSAGE_COLUMN_WIDTHS = {
+  // The minimum widths keep the header labels readable.
+  time: { cssVariable: '--col-time', minimumWidth: 44 },
+  source: { cssVariable: '--col-source', minimumWidth: 60 },
+  bytes: { cssVariable: '--col-bytes', minimumWidth: 48 },
+};
+const MAXIMUM_COLUMN_WIDTH = 600;
+
+// Makes the columns of a message list resizable. `cardElement` contains the
+// header and the rows; the widths are CSS variables on it, so header and
+// rows always line up and newly drawn rows need no extra work.
+function bindColumnResizing(cardElement) {
+  const applyWidth = (column, width) => {
+    const { cssVariable, minimumWidth } = MESSAGE_COLUMN_WIDTHS[column];
+    const clampedWidth = Math.round(Math.min(MAXIMUM_COLUMN_WIDTH, Math.max(minimumWidth, width)));
+    cardElement.style.setProperty(cssVariable, clampedWidth + 'px');
+    return clampedWidth;
+  };
+  const saveWidth = (column, width) => {
+    const widths = preferences.get('insp-columns', {});
+    if (width === null) delete widths[column]; else widths[column] = width;
+    preferences.set('insp-columns', widths);
+  };
+  for (const [column, width] of Object.entries(preferences.get('insp-columns', {}))) {
+    if (MESSAGE_COLUMN_WIDTHS[column] && Number.isFinite(width)) applyWidth(column, width);
+  }
+
+  $$('[data-resize-column]', cardElement).forEach(handle => {
+    const column = handle.dataset.resizeColumn;
+    const headerCell = handle.parentElement;
+    handle.addEventListener('pointerdown', event => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      const startX = event.clientX;
+      const startWidth = headerCell.getBoundingClientRect().width;
+      let currentWidth = startWidth;
+      // Pointer capture keeps the move events coming while the mouse is outside the handle.
+      handle.setPointerCapture(event.pointerId);
+      handle.classList.add('dragging');
+      document.body.classList.add('resizing-columns');
+      const onMove = moveEvent => { currentWidth = applyWidth(column, startWidth + moveEvent.clientX - startX); };
+      const onEnd = () => {
+        handle.removeEventListener('pointermove', onMove);
+        handle.removeEventListener('pointerup', onEnd);
+        handle.removeEventListener('pointercancel', onEnd);
+        handle.classList.remove('dragging');
+        document.body.classList.remove('resizing-columns');
+        saveWidth(column, Math.round(currentWidth));
+      };
+      handle.addEventListener('pointermove', onMove);
+      handle.addEventListener('pointerup', onEnd);
+      handle.addEventListener('pointercancel', onEnd);
+    });
+    // Double-click goes back to the default width from style.css.
+    handle.addEventListener('dblclick', () => {
+      cardElement.style.removeProperty(MESSAGE_COLUMN_WIDTHS[column].cssVariable);
+      saveWidth(column, null);
+    });
+  });
+}
+
+// Legend for the footer of the message list: explains the symbol that the
+// NMEA view shows for an empty field. Only visible in the NMEA view.
+const EMPTY_FIELD_LEGEND = `<span data-role="nmea-legend" title="An NMEA field with nothing between its two commas, e.g. the empty field in “$GPRMC,,A”"><span class="faint">∅</span> empty field</span>`;
 
 // Connects the view buttons of a toolbar to a message list.
 function bindViewModeButtons(container, messageList, initialMode) {
   const buttons = $$('[data-role=view-mode] button', container);
   const select = mode => {
     buttons.forEach(button => button.classList.toggle('on', button.dataset.view === mode));
+    $$('[data-role=nmea-legend]', container).forEach(legend => legend.classList.toggle('hidden', mode !== 'nmea'));
     preferences.set('insp-view', mode);
     messageList.setView(mode);
   };
@@ -2137,7 +2207,7 @@ function renderInspectorTab(container, forwarderId) {
     </div>
     ${MESSAGE_LIST_HEADER('Time the message was received (your local time)')}
     <div class="insp-log" data-role="log"></div>
-    <div class="insp-foot"><span data-role="status"></span><span class="grow"></span><span data-role="counters"></span></div>
+    <div class="insp-foot"><span data-role="status"></span>${EMPTY_FIELD_LEGEND}<span class="grow"></span><span data-role="counters"></span></div>
   </div>`;
   const find = role => $(`[data-role=${role}]`, container);
 
@@ -2146,6 +2216,7 @@ function renderInspectorTab(container, forwarderId) {
     emptyText: 'Start the forwarder to inspect its live data.',
   });
   bindViewModeButtons(container, messageList, preferences.get('insp-view', 'nmea'));
+  bindColumnResizing($('.insp', container));
 
   function renderCounters() {
     find('counters').textContent = `${formatCount(receivedCount)} received · ${formatCount(skippedCount)} skipped by the limits`
@@ -2265,7 +2336,7 @@ function renderCaptureViewerPage(main, captureName) {
       </div>
       ${MESSAGE_LIST_HEADER('Time since the recording started (minutes:seconds)')}
       <div class="insp-log" data-role="log"></div>
-      <div class="insp-foot"><span data-role="progress"></span><span class="grow"></span>
+      <div class="insp-foot"><span data-role="progress"></span>${EMPTY_FIELD_LEGEND}<span class="grow"></span>
         <button class="btn sm" data-role="load-more" title="Load the next records (also happens automatically when you scroll down)">Load more</button></div>
     </div>`;
   const find = role => $(`[data-role=${role}]`, main);
@@ -2274,6 +2345,7 @@ function renderCaptureViewerPage(main, captureName) {
     formatTime: formatCaptureOffset, maxRows: 5000, maxKept: 5000, followNewest: false, emptyText: 'Loading…',
   });
   bindViewModeButtons(main, messageList, preferences.get('insp-view', 'nmea'));
+  bindColumnResizing($('.insp', main));
 
   function renderProgress() {
     const loaded = messageList.messages.length;

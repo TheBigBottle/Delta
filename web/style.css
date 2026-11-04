@@ -234,11 +234,11 @@ canvas.spark { width: 80px; height: 26px; display: block; }
 .insp { display: flex; flex-direction: column; height: 560px; }
 .insp-bar { display: flex; gap: 8px; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
 .insp-log { flex: 1; overflow: auto; font-family: var(--mono); font-size: 12.5px; background: var(--panel); border-radius: 0 0 12px 12px; }
-.ir { display: grid; grid-template-columns: 92px 150px 48px 1fr; gap: 12px; padding: 3px 12px; border-bottom: 1px solid var(--border); align-items: start; }
+.ir { display: grid; grid-template-columns: var(--col-time, 92px) var(--col-source, 150px) var(--col-bytes, 48px) minmax(0, 1fr); gap: 12px; padding: 3px 12px; border-bottom: 1px solid var(--border); align-items: start; }
 .ir:hover { background: var(--hover); }
-.ir .tm { color: var(--faint); }
+.ir .tm { color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ir .sr { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ir .ln { color: var(--faint); text-align: right; }
+.ir .ln { color: var(--faint); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ir .dt { white-space: pre-wrap; word-break: break-all; min-width: 0; }
 .ir .cc { color: var(--faint); font-size: 11px; }
 .ir.hit .dt { background: var(--warn-soft); }
@@ -324,7 +324,7 @@ table.t.compact td { padding: 7px 12px; font-size: 13px; }
   .grid2, .grid3, .epbox .grid3 { grid-template-columns: 1fr; }
   .search input { width: 100%; }
   .ir { grid-template-columns: 80px 1fr; }
-  .ir .sr, .ir .ln { display: none; }
+  .ir .sr, .ir .ln, .col-resize { display: none; }
 }
 
 /* ---------- hover hints ---------- */
@@ -334,6 +334,13 @@ table.t.compact td { padding: 7px 12px; font-size: 13px; }
 /* ---------- table header row of the inspector ---------- */
 .ir.ir-head { font-family: var(--sans); font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--faint); background: var(--panel); border-bottom: 1px solid var(--border); }
 .ir.ir-head:hover { background: var(--panel); }
+/* Drag handle between two header cells: it sits in the 12px grid gap. */
+/* The header cells must not clip, or the handle in the gap would be cut off. */
+.ir.ir-head > span { position: relative; min-width: 0; overflow: visible; }
+.col-resize { position: absolute; top: -3px; bottom: -3px; right: -10px; width: 8px; cursor: col-resize; z-index: 1; }
+.col-resize::after { content: ''; position: absolute; top: 3px; bottom: 3px; left: 3px; width: 2px; border-radius: 1px; background: var(--border); }
+.col-resize:hover::after, .col-resize.dragging::after { background: var(--accent); }
+body.resizing-columns { cursor: col-resize; user-select: none; }
 
 @media (max-width: 900px) {
   .brand-sub { display: none; }

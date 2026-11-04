@@ -150,10 +150,11 @@ Once one forwarder works, you can use **⋯ → Duplicate** to create similar on
 
 The **Inspector** tab shows the messages the input receives as they arrive.
 
-- **Text**, **NMEA** and **Hex** switch the view. The NMEA view colors the parts of each sentence and checks its checksum (✓ correct, ✗ wrong).
+- **Text**, **NMEA** and **Hex** switch the view. The NMEA view colors the parts of each sentence and checks its checksum (✓ correct, ✗ wrong). An empty field (nothing between two commas) is shown as ∅; the legend at the bottom of the table repeats this.
 - Type into **Filter** to show only matching messages. Write `/…/` for a regular expression, e.g. `/^\$GP(RMC|GGA)/`, and add `i` after the last slash to ignore case.
 - The rate limit sets how many messages per second the browser gets (10 to 2000). On top of that, the server sends at most 256 KB per second. Messages over these limits are counted as *skipped*.
 - **Preview** sets how much of each message is transferred (256 B to 16 KB).
+- Drag the dividers in the header row to make the **Time**, **Source** and **Bytes** columns wider or narrower. Double-click a divider to reset it. The widths are remembered in this browser.
 - **Pause** freezes the view and **Clear** empties it. The download button saves the last 2000 messages as text.
 
 Watching the Inspector doesn't slow down forwarding. When the browser can't keep up, Delta leaves out inspector data, never forwarded data.

@@ -243,8 +243,11 @@ func stopForwarders(forwarders ...*engine.Forwarder) {
 
 // Create adds a new forwarder and optionally starts it. If starting fails,
 // the forwarder is still created; the returned status shows the error.
+// fc.Autostart ("Start with Delta" in the editor) is kept; starting right
+// away also switches it on, as the Start button does.
 func (m *Manager) Create(fc config.ForwarderConfig, start bool) (ForwarderStatus, error) {
-	fc.ID, fc.Created, fc.Autostart = "", time.Time{}, start
+	fc.ID, fc.Created = "", time.Time{}
+	fc.Autostart = fc.Autostart || start
 	if err := fc.Normalize(); err != nil {
 		return ForwarderStatus{}, err
 	}
@@ -265,8 +268,11 @@ func (m *Manager) Create(fc config.ForwarderConfig, start bool) (ForwarderStatus
 }
 
 // Update replaces a forwarder's configuration. A running forwarder is
-// restarted with the new configuration.
-func (m *Manager) Update(id string, fc config.ForwarderConfig) (ForwarderStatus, error) {
+// restarted with the new configuration. autostart sets the "Start with
+// Delta" flag; nil keeps the current value (API clients that send a config
+// without the "autostart" key must not switch it off by accident). Changing
+// the flag does not start or stop the forwarder now.
+func (m *Manager) Update(id string, fc config.ForwarderConfig, autostart *bool) (ForwarderStatus, error) {
 	m.mu.Lock()
 	inst := m.instances[id]
 	if inst == nil {
@@ -274,6 +280,9 @@ func (m *Manager) Update(id string, fc config.ForwarderConfig) (ForwarderStatus,
 		return ForwarderStatus{}, ErrNotFound
 	}
 	fc.ID, fc.Created, fc.Autostart = id, inst.config.Created, inst.config.Autostart
+	if autostart != nil {
+		fc.Autostart = *autostart
+	}
 	if err := fc.Normalize(); err != nil {
 		m.mu.Unlock()
 		return ForwarderStatus{}, err

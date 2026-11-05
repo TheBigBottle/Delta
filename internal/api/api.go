@@ -7,6 +7,7 @@ package api
 // embedded static files of the web interface.
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -279,12 +280,25 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
-	var fc config.ForwarderConfig
-	if err := readJSON(r, &fc); err != nil {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20))
+	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	status, err := s.manager.Update(r.PathValue("id"), fc)
+	var fc config.ForwarderConfig
+	// Read "autostart" a second time as a pointer: nil means the request did
+	// not contain the key, and the forwarder keeps its current value.
+	var autostartField struct {
+		Autostart *bool `json:"autostart"`
+	}
+	if len(bytes.TrimSpace(body)) > 0 {
+		if err := json.Unmarshal(body, &fc); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid request: %w", err))
+			return
+		}
+		json.Unmarshal(body, &autostartField) // cannot fail after the line above
+	}
+	status, err := s.manager.Update(r.PathValue("id"), fc, autostartField.Autostart)
 	switch {
 	case errors.Is(err, manager.ErrNotFound):
 		writeError(w, http.StatusNotFound, err)

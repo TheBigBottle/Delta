@@ -989,7 +989,7 @@ function importForwardersFromFile() {
 function openForwarderMenu(anchorElement, fwd, afterDelete) {
   openMenu(anchorElement, [
     { label: 'Edit', icon: 'edit', onSelect: () => openForwarderEditor(fwd) },
-    { label: 'Duplicate', icon: 'copy', onSelect: () => openForwarderEditor({ ...configOf(fwd), id: undefined, name: fwd.name + ' copy' }) },
+    { label: 'Duplicate', icon: 'copy', onSelect: () => openForwarderEditor({ ...configOf(fwd), id: undefined, name: fwd.name + ' copy', autostart: false }) },
     { label: 'Export JSON', icon: 'download', onSelect: () => exportForwarders([fwd.id]) },
     '-',
     { label: 'Delete', icon: 'trash', danger: true, onSelect: async () => { if (await deleteForwarders([fwd.id])) afterDelete?.(); } },
@@ -1316,7 +1316,7 @@ function renderForwarderListPage(main) {
 function newForwarderTemplate() {
   // 10110 is the common port for NMEA over IP.
   return {
-    name: '', tags: [], framing: 'lines', idle_alert: 0,
+    name: '', tags: [], framing: 'lines', idle_alert: 0, autostart: false,
     input: { mode: 'tcp-listen', host: '', port: 10110 },
     outputs: [{ mode: 'tcp-listen', host: '', port: 10111 }],
   };
@@ -1412,6 +1412,7 @@ function openForwarderEditor(existing) {
           </div>
           <div class="grid2">
             <label class="f">Idle alert (s)<input type="number" min="0" data-path="idle_alert" value="${draft.idle_alert || ''}" placeholder="off"><span class="hint">Alert when no data arrives for this long</span></label>
+            <label class="chk" style="align-self:center" title="Start this forwarder whenever Delta starts, e.g. after a reboot or an update. Ticking it does not start the forwarder now. The Start button ticks it and the Stop button unticks it"><input type="checkbox" data-path="autostart" ${draft.autostart ? 'checked' : ''}> Start with Delta</label>
           </div>
           <label class="f" title="Free-text notes for you and your colleagues, e.g. where the device is, who to call, or why the forwarder exists. Shown on the detail page">Comment<textarea data-path="comment" rows="2" maxlength="4000" placeholder="optional notes">${escapeHtml(draft.comment || '')}</textarea></label>
           <label class="f">Data format
@@ -1474,6 +1475,7 @@ function openForwarderEditor(existing) {
     let value = field.value;
     if (path === 'tags') value = value.split(',').map(tag => tag.trim()).filter(Boolean);
     else if (field.type === 'number') value = value === '' ? 0 : Number(value);
+    else if (field.type === 'checkbox') value = field.checked;
     if (path.endsWith('.mode')) {
       // A remote host is no bind address (and the other way round): clear it when
       // the endpoint switches between a listen and a connect/send mode.

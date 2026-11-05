@@ -183,7 +183,7 @@ A forwarder without an `id` gets one automatically.
 ```
 
 - `comment` holds free-text notes (up to 4000 characters). The detail page shows them, and the list shows the first part under the name (hover it to read all of it).
-- `autostart` records whether the forwarder was running. Forwarders that were running come back after a restart or reboot.
+- `autostart` ("Start with Delta" in the editor) decides whether the forwarder starts when Delta starts, e.g. after a reboot. Start sets it and Stop clears it, so forwarders that were running come back after a restart; the checkbox in the editor sets it without starting or stopping anything. In `PUT /api/forwarders/{id}`, leaving the key out keeps the current value.
 - `data_dir` is where captures are stored. A relative path is relative to the config file's directory.
 - `event_log` is the file Delta appends every event to (starts, stops, connects, errors, alerts), one line per event in a syslog-style format:
   ```

@@ -61,6 +61,8 @@ The colored dot shows the health of a forwarder. Green means running, orange mea
 
 Click a forwarder's name to open its detail page. At the top are the Stop/Start, Restart and Edit buttons, a live diagram of the input and outputs, and tiles with the current numbers. If you save changes to a running forwarder, Delta restarts it.
 
+**Start with Delta** in the editor decides whether the forwarder starts when Delta starts, for example after a reboot or an update. Ticking it does not start the forwarder right away. **Start** and **Create & start** tick it, and **Stop** unticks it, so a forwarder you stopped stays stopped after a restart unless you tick the box again.
+
 | Tab | Shows |
 |---|---|
 | Traffic | Data rate of the last 10 minutes. Hover the chart for the values. |

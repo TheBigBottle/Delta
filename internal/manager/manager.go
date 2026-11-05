@@ -156,15 +156,33 @@ func (m *Manager) saveLocked() {
 	}
 }
 
-// StartAutostartForwarders starts every forwarder that was running when Delta last stopped.
-func (m *Manager) StartAutostartForwarders() {
+// StartAutostartForwarders starts every forwarder with "Start with Delta"
+// (the autostart flag), plus the forwarders in resumeIDs: the ones that were
+// running before a self-update restart (see RunningForwarderIDs), so an
+// update does not stop forwarders that were started by hand.
+func (m *Manager) StartAutostartForwarders(resumeIDs []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, id := range m.instanceOrder {
-		if inst := m.instances[id]; inst.config.Autostart {
+		if inst := m.instances[id]; inst.config.Autostart || slices.Contains(resumeIDs, id) {
 			m.startLocked(inst)
 		}
 	}
+}
+
+// RunningForwarderIDs returns the forwarders that are meant to run right now:
+// running, or failed to start and being retried. A self-update restart hands
+// them to the new process (see StartAutostartForwarders).
+func (m *Manager) RunningForwarderIDs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ids := []string{}
+	for _, id := range m.instanceOrder {
+		if inst := m.instances[id]; inst.running != nil || inst.state == "error" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 // eventLoggerFor returns the function a running forwarder uses to write to
@@ -243,11 +261,10 @@ func stopForwarders(forwarders ...*engine.Forwarder) {
 
 // Create adds a new forwarder and optionally starts it. If starting fails,
 // the forwarder is still created; the returned status shows the error.
-// fc.Autostart ("Start with Delta" in the editor) is kept; starting right
-// away also switches it on, as the Start button does.
+// fc.Autostart ("Start with Delta" in the editor) is kept as given;
+// starting right away does not change it.
 func (m *Manager) Create(fc config.ForwarderConfig, start bool) (ForwarderStatus, error) {
 	fc.ID, fc.Created = "", time.Time{}
-	fc.Autostart = fc.Autostart || start
 	if err := fc.Normalize(); err != nil {
 		return ForwarderStatus{}, err
 	}
@@ -329,7 +346,8 @@ func (m *Manager) Delete(ids ...string) error {
 }
 
 // SetRunning starts, stops or restarts forwarders. It also stores whether
-// each forwarder should run after Delta restarts (the autostart flag).
+// They do not change the autostart flag ("Start with Delta"): only the
+// forwarder editor sets that (user decision 2026-11-05).
 func (m *Manager) SetRunning(action string, ids ...string) error {
 	m.mu.Lock()
 	var toStop []*engine.Forwarder
@@ -342,9 +360,7 @@ func (m *Manager) SetRunning(action string, ids ...string) error {
 		if action == "stop" || action == "restart" {
 			toStop = append(toStop, m.stopLocked(inst))
 		}
-		inst.config.Autostart = action != "stop"
 	}
-	m.saveLocked()
 	m.mu.Unlock()
 	stopForwarders(toStop...)
 
@@ -534,7 +550,7 @@ func (m *Manager) sample(now time.Time) {
 				}
 			}
 			inst.lastCounters, inst.lastSampleAt = totals, now
-		} else if inst.state == "error" && inst.config.Autostart && now.After(inst.nextRetryAt) {
+		} else if inst.state == "error" && now.After(inst.nextRetryAt) { // "error" only follows a start; Stop clears it
 			m.startLocked(inst) // e.g. the port was busy or the network was not up yet at boot
 		}
 		inst.history.add(now.UnixMilli(), inst.rates)

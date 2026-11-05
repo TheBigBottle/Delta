@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -88,7 +89,7 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 		BaseContext:       func(net.Listener) context.Context { return serverCtx },
 	}
-	deltaManager.StartAutostartForwarders()
+	deltaManager.StartAutostartForwarders(takeResumeForwarderIDs())
 	stopSampler := make(chan struct{})
 	go deltaManager.RunSampler(stopSampler)
 	go deltaManager.RunUpdateChecker(stopSampler)
@@ -117,6 +118,12 @@ func main() {
 	case newBinaryPath = <-deltaManager.RestartRequests():
 		slog.Info("update installed, restarting", "binary", newBinaryPath)
 	}
+	// Remember what runs now, before the shutdown stops it: after an update
+	// the new process starts the same forwarders again.
+	var resumeIDs []string
+	if newBinaryPath != "" {
+		resumeIDs = deltaManager.RunningForwarderIDs()
+	}
 	cancelServerCtx()
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancelShutdown()
@@ -130,7 +137,7 @@ func main() {
 	// shutdown above wins over the restart: the new binary is already in
 	// place and starts the next time Delta is started.
 	if newBinaryPath != "" && signalCtx.Err() == nil {
-		restartInto(newBinaryPath)
+		restartInto(newBinaryPath, resumeIDs)
 	}
 }
 
@@ -138,12 +145,14 @@ func main() {
 // the same arguments and environment. The process ID stays the same, so a
 // service manager such as systemd does not notice the restart. All sockets
 // are already closed by the shutdown above (Go opens them close-on-exec
-// anyway). The forwarders come back from their autostart flags.
+// anyway). The forwarders that were running (resumeIDs) are passed in an
+// environment variable, so they come back even without "Start with Delta".
 //
 // The path comes from the updater: after the binary was renamed,
 // os.Executable() would point to the old file ("<binary>.old").
-func restartInto(binaryPath string) {
-	err := syscall.Exec(binaryPath, os.Args, os.Environ())
+func restartInto(binaryPath string, resumeIDs []string) {
+	environment := append(os.Environ(), resumeForwardersEnv+"="+strings.Join(resumeIDs, ","))
+	err := syscall.Exec(binaryPath, os.Args, environment)
 	// Exec only returns on failure. Exit with an error, so a service manager
 	// set to restart on failure starts Delta again (with the new binary).
 	slog.Error("restart failed; start Delta again by hand", "binary", binaryPath, "err", err)
@@ -156,4 +165,19 @@ func displayAddress(bind string, port int) string {
 		bind = "localhost"
 	}
 	return net.JoinHostPort(bind, strconv.Itoa(port))
+}
+
+// resumeForwardersEnv carries the IDs of the forwarders that were running
+// across a self-update restart (comma separated). Only restartInto sets it.
+const resumeForwardersEnv = "DELTA_RESUME_FORWARDERS"
+
+// takeResumeForwarderIDs reads and removes resumeForwardersEnv, so the list
+// is used once and does not leak into later restarts or child processes.
+func takeResumeForwarderIDs() []string {
+	value := os.Getenv(resumeForwardersEnv)
+	os.Unsetenv(resumeForwardersEnv)
+	if value == "" {
+		return nil
+	}
+	return strings.Split(value, ",")
 }

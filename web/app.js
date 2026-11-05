@@ -1412,7 +1412,7 @@ function openForwarderEditor(existing) {
           </div>
           <div class="grid2">
             <label class="f">Idle alert (s)<input type="number" min="0" data-path="idle_alert" value="${draft.idle_alert || ''}" placeholder="off"><span class="hint">Alert when no data arrives for this long</span></label>
-            <label class="chk" style="align-self:center" title="Start this forwarder whenever Delta starts, e.g. after a reboot or an update. Ticking it does not start the forwarder now. The Start button ticks it and the Stop button unticks it"><input type="checkbox" data-path="autostart" ${draft.autostart ? 'checked' : ''}> Start with Delta</label>
+            <label class="chk" style="align-self:center" title="Start this forwarder whenever Delta starts, e.g. after a reboot. Only this box decides that: the Start and Stop buttons do not change it, and ticking it does not start the forwarder now"><input type="checkbox" data-path="autostart" ${draft.autostart ? 'checked' : ''}> Start with Delta</label>
           </div>
           <label class="f" title="Free-text notes for you and your colleagues, e.g. where the device is, who to call, or why the forwarder exists. Shown on the detail page">Comment<textarea data-path="comment" rows="2" maxlength="4000" placeholder="optional notes">${escapeHtml(draft.comment || '')}</textarea></label>
           <label class="f">Data format
@@ -1675,7 +1675,7 @@ function renderDetailPage(main, forwarderId) {
 
     let bannersHtml = '';
     if (fwd.state === 'error') {
-      bannersHtml += `<div class="banner error">${icon('alert')}<span><b>Start failed:</b> ${escapeHtml(fwd.error)}${fwd.autostart ? ' — retrying every 15 s.' : ''}</span></div>`;
+      bannersHtml += `<div class="banner error">${icon('alert')}<span><b>Start failed:</b> ${escapeHtml(fwd.error)} — retrying every 15 s.</span></div>`;
     }
     const problems = endpointProblems(fwd);
     if (problems.length) {

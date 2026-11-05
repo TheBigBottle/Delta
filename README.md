@@ -121,7 +121,7 @@ journalctl -u delta -f            # live log
 
 Open `http://<server>:8470` right away and choose the password. If other machines need to reach Delta, open the web port and the forwarder ports in the firewall (see Troubleshooting).
 
-Forwarders that were running start again after a reboot (`autostart`). To reset a forgotten password, stop the service,
+Forwarders with "Start with Delta" (`autostart`) start again after a reboot. To reset a forgotten password, stop the service,
 add `"password"` to `/var/lib/delta/delta.json` and start it again.
 To update, replace `/usr/local/bin/delta` and run `sudo systemctl restart delta`.
 
@@ -183,7 +183,7 @@ A forwarder without an `id` gets one automatically.
 ```
 
 - `comment` holds free-text notes (up to 4000 characters). The detail page shows them, and the list shows the first part under the name (hover it to read all of it).
-- `autostart` ("Start with Delta" in the editor) decides whether the forwarder starts when Delta starts, e.g. after a reboot. Start sets it and Stop clears it, so forwarders that were running come back after a restart; the checkbox in the editor sets it without starting or stopping anything. In `PUT /api/forwarders/{id}`, leaving the key out keeps the current value.
+- `autostart` ("Start with Delta" in the editor) decides whether the forwarder starts when Delta starts, e.g. after a reboot. Only the editor (or the API) changes it; starting and stopping a forwarder does not. After a self-update, Delta starts the forwarders that were running, with or without `autostart`. In `PUT /api/forwarders/{id}`, leaving the key out keeps the current value; `POST /api/forwarders?start=1` starts the new forwarder without setting it.
 - `data_dir` is where captures are stored. A relative path is relative to the config file's directory.
 - `event_log` is the file Delta appends every event to (starts, stops, connects, errors, alerts), one line per event in a syslog-style format:
   ```

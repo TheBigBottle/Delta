@@ -8,7 +8,7 @@ An input together with its outputs is called a forwarder. You can run as many fo
 - Each message is copied once, and all outputs share that copy.
 - Each receiver has its own queue, so a slow receiver never holds up the others.
 - On a local machine a message takes about 31 µs from input to output. Using the web interface doesn't slow this down.
-- Everything is stored in one config file (`delta.json`). Forwarders that were running start again after a restart or reboot.
+- Everything is stored in one config file (`delta.json`). Forwarders with **Start with Delta** start again after a restart or reboot.
 - Delta retries broken connections by itself, so you don't have to restart anything after a device reboots.
 
 ### Words used in Delta
@@ -61,7 +61,7 @@ The colored dot shows the health of a forwarder. Green means running, orange mea
 
 Click a forwarder's name to open its detail page. At the top are the Stop/Start, Restart and Edit buttons, a live diagram of the input and outputs, and tiles with the current numbers. If you save changes to a running forwarder, Delta restarts it.
 
-**Start with Delta** in the editor decides whether the forwarder starts when Delta starts, for example after a reboot or an update. Ticking it does not start the forwarder right away. **Start** and **Create & start** tick it, and **Stop** unticks it, so a forwarder you stopped stays stopped after a restart unless you tick the box again.
+**Start with Delta** in the editor decides whether the forwarder starts when Delta starts, for example after a reboot. Only this box decides that: **Start** and **Stop** run or halt the forwarder now and leave the box as it is, and ticking the box does not start the forwarder right away. A forwarder that you started by hand without the box therefore stays stopped after a reboot. An update restart is the exception: Delta starts again exactly the forwarders that were running.
 
 | Tab | Shows |
 |---|---|
@@ -330,7 +330,7 @@ To install by hand, click **Install** under Settings → Updates. Delta then:
 1. downloads the binary for this machine (for example `delta-linux-arm64`) and rejects it unless it matches the release's `SHA256SUMS`,
 2. runs the new file with `-version` to make sure it starts on this machine,
 3. renames the running binary to `<binary>.old` and moves the new one into its place,
-4. stops all forwarders cleanly and restarts itself with the same command line. Forwarders that were running start again, and everybody has to sign in again.
+4. stops all forwarders cleanly and restarts itself with the same command line. Forwarders that were running start again (also those without **Start with Delta**), and everybody has to sign in again.
 
 If something fails, the old binary stays in place and the reason is shown under Settings and in the event log. Delta needs write access to the folder of its binary. A binary in `/usr/local/bin` owned by root cannot update itself (see the README for a systemd setup that can). To go back, stop Delta and rename `<binary>.old` to the original name. Versions before 1.8.0 do not know the `updates` key: if a switch is on, remove the `updates` line from the config file before you start an older version.
 
